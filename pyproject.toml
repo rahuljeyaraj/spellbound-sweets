@@ -1,0 +1,9 @@
+[project]
+name = "spellbound-sweets"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "mediapipe>=1.2.0",
+    "numpy>=2.4.6",
+    "pyserial>=3.5",
+]

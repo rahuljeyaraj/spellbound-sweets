@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+# Downloaded by hand3d.py on first run
+models/
+# Calibration photos show the room; the result only fits these cameras on this mount
+calib/
