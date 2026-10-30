@@ -29,8 +29,12 @@ def main() -> None:
     ops.append(f"0.6 w {x0 * PT:.3f} {ruler_y:.3f} m {(x0 + 100) * PT:.3f} {ruler_y:.3f} l S")
     ops.append(f"BT /F1 10 Tf {(x0 + 104) * PT:.3f} {ruler_y - 3:.3f} Td "
                f"(this line is 100 mm, squares are {SQUARE_MM:g} mm) Tj ET")
-    stream = "\n".join(ops).encode()
+    write_pdf(ops, page_w, page_h, "board.pdf")
 
+
+def write_pdf(ops: list[str], page_w: float, page_h: float, name: str) -> None:
+    """Write one page of PDF drawing operators (page size in mm) to calib/<name>."""
+    stream = "\n".join(ops).encode()
     objs = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -50,7 +54,7 @@ def main() -> None:
     pdf += f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
 
     CALIB_DIR.mkdir(exist_ok=True)
-    out = CALIB_DIR / "board.pdf"
+    out = CALIB_DIR / name
     out.write_bytes(bytes(pdf))
     print(f"wrote {out}")
 
