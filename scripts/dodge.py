@@ -15,7 +15,10 @@ speed curve of the move, so it is known mid-move and when a hand covers the mark
 Dodge: when any hand point is within --trigger mm of the rim centre (seen from above) and no
 more than --height mm above the rim, the bowl jumps to whichever end of the rail is furthest
 from the hand (only ever the ends: short steps looked like the bowl following the hand). If it
-is already there, it stays. A new dodge waits until the last move has finished. After --rest-after seconds with no hand
+is already there, it stays. A new dodge waits until the last move has finished, and until the
+hand has come --hyst mm closer than it has been since (so a hand hovering between the ends does
+not send the bowl back and forth). Hand points below the rim never trigger a dodge, and if one
+is in the bowl or in its path, the bowl stays put: moving into a hand made it lose steps. After --rest-after seconds with no hand
 near, the bowl drifts back to the middle slowly.
 
 Lost steps: whenever the bowl is still, the base marker's position is compared with the axis.
@@ -136,6 +139,15 @@ def dodge_target(y: float, hand_along: float) -> float:
     return YMIN if hand_y - YMIN > YMAX - hand_y else YMAX
 
 
+def path_blocked(low: np.ndarray, travel: float, radius: float, margin: float = 25.0) -> bool:
+    """True if a hand point below the rim (rail coordinates, (N, 3)) is in the bowl now or in the
+    strip it would sweep moving `travel` mm along the rail."""
+    if len(low) == 0:
+        return False
+    lo, hi = min(0.0, travel) - radius - margin, max(0.0, travel) + radius + margin
+    return bool(np.any((low[:, 0] > lo) & (low[:, 0] < hi) & (np.abs(low[:, 1]) < radius + margin)))
+
+
 def home(m: Marlin, show) -> None:
     m.send("M204 P500 T500")
     m.send("G28 Y", timeout=60, idle=show)
@@ -150,10 +162,11 @@ def main() -> int:
     ap.add_argument("--port", help="the SKR's serial port, e.g. COM9; leave out for a dry run")
     ap.add_argument("--cams", type=int, nargs=2, default=[0, 1], help="camera numbers (2 is OBS)")
     ap.add_argument("--exposure", type=float, help="lock exposure (e.g. -5); default auto")
-    ap.add_argument("--speed", type=float, default=300, help="dodge top speed, mm/s")
-    ap.add_argument("--accel", type=float, default=3000, help="dodge acceleration, mm/s^2")
-    ap.add_argument("--trigger", type=float, default=150, help="dodge when a hand point is this close, mm")
+    ap.add_argument("--speed", type=float, default=700, help="dodge top speed, mm/s")
+    ap.add_argument("--accel", type=float, default=7000, help="dodge acceleration, mm/s^2")
+    ap.add_argument("--trigger", type=float, default=250, help="dodge when a hand point is this close, mm")
     ap.add_argument("--height", type=float, default=250, help="...and at most this high above the rim, mm")
+    ap.add_argument("--hyst", type=float, default=50, help="after a move, the hand must come this much closer, mm")
     ap.add_argument("--rest", type=float, default=110, help="where the bowl waits, Y mm")
     ap.add_argument("--rest-after", type=float, default=3.0, help="seconds with no hand near before going back")
     ap.add_argument("--slip", type=float, default=6.0, help="marker vs axis difference that means lost steps, mm")
@@ -187,6 +200,7 @@ def main() -> int:
         still_since = time.monotonic()
         dry_placed = False
         slips = 0
+        ref = a.trigger + a.hyst
 
         def say(text: str) -> None:
             print(text)
@@ -286,14 +300,16 @@ def main() -> int:
             marks = match_markers(cal, mk0, mk1)
             y = axis.y(now)
 
-            # The nearest point of each hand, in rail coordinates around the rim centre.
-            near_pts = []
-            for tr, (pts, _, _, _) in current:
-                rp = rail.to_rail(pts, y)
-                near_pts.append((tr, rp[np.argmin(np.hypot(rp[:, 0], rp[:, 1]))]))
-            close = [(tr, rp) for tr, rp in near_pts if np.hypot(rp[0], rp[1]) < a.trigger and rp[2] < a.height]
+            # Every hand point in rail coordinates around the rim centre: along, across, above the rim.
+            hand_rps = [(tr, rail.to_rail(pts, y)) for tr, (pts, _, _, _) in current]
+            near_pts = [(tr, rp[np.argmin(np.hypot(rp[:, 0], rp[:, 1]))]) for tr, rp in hand_rps]
             if near_pts and min(np.hypot(rp[0], rp[1]) for _, rp in near_pts) < a.trigger + 150:
                 last_near = now
+            # Only points above the rim count as reaching. Below it a hand is beside or in the bowl,
+            # and moving would hit it (that is what made it lose steps).
+            reach = [p for _, rp in hand_rps for p in rp if 0 <= p[2] < a.height]
+            dist = min((float(np.hypot(p[0], p[1])) for p in reach), default=np.inf)
+            low = np.array([p for _, rp in hand_rps for p in rp if p[2] < 0]).reshape(-1, 3)
 
             if m is None and not dry_placed and rail.base_id in marks:
                 # Dry run: start the pretend axis where the bowl really is.
@@ -316,21 +332,32 @@ def main() -> int:
                         state["banner"] = f"marker says Y{seen_y:.0f}, off the rail: press h to re-home"
                         say(state["banner"])
 
-            if close and not moving and state["enabled"] and not state["banner"]:
-                tr, rp = min(close, key=lambda c: np.hypot(c[1][0], c[1][1]))
-                target = dodge_target(y, rp[0])
-                if abs(target - y) > 5:
+            # Hysteresis: after a move, the hand must come --hyst mm closer than it has been since
+            # (ref follows the hand's furthest distance) before the next dodge. A hand hovering
+            # between the ends no longer sends the bowl back and forth.
+            if moving or not np.isfinite(dist):
+                ref = dist if moving and np.isfinite(dist) else a.trigger + a.hyst
+            else:
+                ref = min(a.trigger + a.hyst, max(ref, dist))
+            reaching = dist < a.trigger and dist < ref - a.hyst
+
+            if reaching and not moving and state["enabled"] and not state["banner"]:
+                p = min(reach, key=lambda q: np.hypot(q[0], q[1]))
+                target = dodge_target(y, p[0])
+                if abs(target - y) <= 5:
+                    state["text"] = "cornered at the end of the rail"
+                elif path_blocked(low, (target - y) * rail.scale, rail.radius):
+                    state["text"] = "hand beside the bowl: staying put"
+                else:
                     seen_at = max(s0, s1)  # when the newer of the two frames was taken
                     axis.move(target, a.speed, a.accel)
                     state["text"] = f"DODGE to Y{target:.0f}"
-                    say(f"dodge: hand {np.hypot(rp[0], rp[1]):.0f} mm away, {rp[2]:+.0f} mm above rim; "
+                    say(f"dodge: hand {dist:.0f} mm away, {p[2]:+.0f} mm above rim; "
                         f"Y{y:.0f} to Y{target:.0f}; frame to command {1000 * (time.monotonic() - seen_at):.0f} ms")
-                else:
-                    state["text"] = "cornered at the end of the rail"
             elif not moving and now - last_near > a.rest_after and abs(y - a.rest) > 2 and not state["banner"]:
                 axis.move(a.rest, 100, 1000)
                 state["text"] = "back to rest"
-            elif not moving and not close:
+            elif not moving and not reaching:
                 state["text"] = "watching" if state["enabled"] else "dodging off"
 
             draw(got, now, current, marks, near_pts)
