@@ -14,17 +14,21 @@ speed curve of the move, so it is known mid-move and when a hand covers the mark
 
 Dodge: when any hand point is within --trigger mm of the rim centre (seen from above) and no
 more than --height mm above the rim, the bowl jumps to whichever end of the rail is furthest
-from the hand (only ever the ends: short steps looked like the bowl following the hand). It
-stays there afterwards; there is no drifting back to the middle (it delayed dodges, and in
-short hops looked jittery). If it
-is already there, it stays. A new dodge waits until the last move has finished, and until the
-hand has come --hyst mm closer than it has been since (so a hand hovering between the ends does
-not send the bowl back and forth); a hand over the opening always counts.
+from the hand (only ever the ends: short steps looked like the bowl following the hand). If it
+is already there, it stays. Only the two ends are places to stay: after homing the bowl waits at
+the home end, and if it is ever stopped anywhere else (a hand in its way, a feint return called
+off) it goes on to an end as soon as it can. There is no drifting back to the middle (it delayed
+dodges, and in short hops looked jittery). A new dodge waits until the last move has finished,
+and until the hand has come --hyst mm closer than it has been since (so a hand hovering between
+the ends does not send the bowl back and forth); a hand over the opening always counts. A
+dropped frame or two does not reset that; only half a second with no hand does.
 
-Feints: a random --feint share of dodges go only 40 to 80% of the way, then dart back to 0 to
-40 mm from where the bowl started, so a hand that has learned to follow it is caught out. The
-return is skipped if a hand below the rim is in its way. Hand points below the rim never trigger a dodge, and if one
-is in the bowl or in its path, the bowl stays put: moving into a hand made it lose steps.
+Feints: a random --feint share of dodges go only 40 to 80% of the way, then dart back to the end
+they came from, so a hand that has learned to follow it is caught out. The return is called off
+if a hand below the rim is in its way, or a hand is over the spot it would go back to (that hand
+did not follow, and the bowl would land under it); the bowl then goes on to an end instead.
+Hand points below the rim never trigger a dodge, and if one is in the bowl or in its path, the
+bowl stays put: moving into a hand made it lose steps.
 Lost steps: whenever the bowl is still, the base marker's position is compared with the axis.
 If they differ by more than --slip mm, it re-homes by itself (about 3 s) and goes on. (Not
 G92: Marlin shifts its soft limits with it, so a stall point became a wall.) 800 mm/s at 8000 mm/s2 with the bowl lost steps on long moves
@@ -50,6 +54,7 @@ from y_sweep import Marlin
 
 YMIN, YMAX = 5.0, 215.0
 LAG = 0.08  # s from sending a move to the bed starting (bench-log: measured 0.08 to 0.1 s over)
+FORGET = 0.5  # s with no hand near before the hysteresis starts afresh (the tracker's forget time)
 
 
 class Rail:
@@ -162,13 +167,22 @@ def path_blocked(low: np.ndarray, travel: float, radius: float, margin: float = 
     return bool(np.any((low[:, 0] > lo) & (low[:, 0] < hi) & (np.abs(low[:, 1]) < radius + margin)))
 
 
+def over_spot(reach: list[np.ndarray], travel: float, radius: float, margin: float = 25.0) -> bool:
+    """True if a reaching hand point (rail coordinates) would be over the bowl, or within margin
+    mm of its rim, once the bowl has moved `travel` mm along the rail."""
+    return any(np.hypot(p[0] - travel, p[1]) < radius + margin for p in reach)
+
+
 def home(m: Marlin, show) -> None:
+    """Home Y, check the switch has let go, then wait at the home end of the rail."""
     m.send("M204 P500 T500")
     m.send("G28 Y", timeout=60, idle=show)
     m.send("G0 Y20 F3000")
     m.send("M400", timeout=60, idle=show)
     if y_switch_triggered(m):
         raise RuntimeError("the Y switch reads pressed at Y20, so the home was not real; check the switch")
+    m.send(f"G0 Y{YMIN:g} F3000")
+    m.send("M400", timeout=60, idle=show)
 
 
 def main() -> int:
@@ -182,7 +196,6 @@ def main() -> int:
     ap.add_argument("--height", type=float, default=250, help="...and at most this high above the rim, mm")
     ap.add_argument("--feint", type=float, default=0.3, help="share of dodges that are feints, 0 to 1")
     ap.add_argument("--hyst", type=float, default=50, help="after a move, the hand must come this much closer, mm")
-    ap.add_argument("--rest", type=float, default=110, help="where the bowl waits, Y mm")
     ap.add_argument("--slip", type=float, default=6.0, help="marker vs axis difference that means lost steps, mm")
     ap.add_argument("--max-err", type=float, default=20.0, help="reject hand pairs above this px error")
     ap.add_argument("--spread", action="store_true", help="Y driver in spreadCycle: louder, more torque at speed")
@@ -209,13 +222,14 @@ def main() -> int:
         wait_for_frames(cams)
         dets = [Detector(c, 2) for c in cams]
         tracker = Tracker(0.5)
-        axis = Axis(m, a.rest)
+        axis = Axis(m, YMIN)
         state = {"text": "starting", "banner": None, "enabled": True, "log": []}
         last_seq = [0, 0]
         still_since = time.monotonic()
         dry_placed = False
         slips = 0
         ref = a.trigger + a.hyst
+        hand_seen = 0.0  # when a hand was last in reach height
         last_hold = None
         pending: float | None = None  # where a feint goes back to once its first move ends
         rng = np.random.default_rng()
@@ -304,17 +318,22 @@ def main() -> int:
                 draw(got, now, [], marks, [])
             cv2.waitKey(1)
 
+        def rehome(text: str) -> Axis:
+            """Home, re-anchor the rail on the marker and wait at the home end. The banner is
+            cleared first, so anchor() puts it back if the printer is still out of place."""
+            state["text"] = text
+            state["banner"] = None
+            home(m, idle_show)
+            anchor(YMIN)
+            return Axis(m, YMIN)
+
         if m:
             m.send("G21")
             m.send("G90")
             m.send(f"M569 S{0 if a.spread else 1} Y")  # stealthChop (quiet) unless --spread
             m.send(f"M203 Y{a.speed:g}")
             m.send(f"M201 Y{a.accel:g}")
-            state["text"] = "homing Y"
-            home(m, idle_show)
-            anchor(20.0)
-            axis = Axis(m, 20.0)
-            axis.move(a.rest, 100, 1000)
+            axis = rehome("homing Y")
         say(f"ready: dodge at {a.speed:g} mm/s, {a.accel:g} mm/s2, trigger {a.trigger:g} mm")
         state["text"] = "watching"
 
@@ -327,14 +346,10 @@ def main() -> int:
                 state["enabled"] = not state["enabled"]
                 say("dodging " + ("on" if state["enabled"] else "off"))
             if key == ord("h") and m and not axis.moving(time.monotonic()):
-                state["text"] = "re-homing"
-                home(m, idle_show)
-                anchor(20.0)
-                axis = Axis(m, 20.0)
+                axis = rehome("re-homing")
                 pending = None
-                axis.move(a.rest, 100, 1000)
-                state["banner"] = None
                 say("re-homed")
+                continue  # the frame in hand is from before the home
             if got is None:
                 continue
             now = time.monotonic()
@@ -368,28 +383,30 @@ def main() -> int:
                     # spot where the bowl stalled became a wall it would not pass.
                     slips += 1
                     say(f"lost steps: axis said Y{y:.0f}, marker says Y{seen_y:.0f}; re-homing ({slips} so far)")
-                    state["text"] = "re-homing"
-                    home(m, idle_show)
-                    anchor(20.0)
-                    axis = Axis(m, 20.0)
+                    axis = rehome("re-homing")
                     pending = None
-                    axis.move(a.rest, 100, 1000)
                     state["text"] = "watching"
+                    continue  # the hands and the bowl's place in this frame are from before the home
 
             # Hysteresis: after a move, the hand must come --hyst mm closer than it has been since
             # (ref follows the hand's furthest distance) before the next dodge. A hand hovering
-            # between the ends no longer sends the bowl back and forth.
-            if moving or not np.isfinite(dist):
-                ref = dist if moving and np.isfinite(dist) else a.trigger + a.hyst
-            else:
-                ref = min(a.trigger + a.hyst, max(ref, dist))
+            # between the ends no longer sends the bowl back and forth. A dropped frame keeps ref;
+            # only a hand gone for FORGET s lets the next one count at once.
+            if np.isfinite(dist):
+                hand_seen = now
+                ref = dist if moving else min(a.trigger + a.hyst, max(ref, dist))
+            elif now - hand_seen > FORGET:
+                ref = a.trigger + a.hyst
             # A hand over the opening always counts; otherwise a hand that followed the bowl to
             # its new spot could never come the extra --hyst mm closer.
             reaching = dist < a.trigger and dist < max(ref - a.hyst, rail.radius)
+            # Only the two ends are places to stay. Stopped anywhere else (a feint whose return
+            # was called off, a hand in the way), the bowl goes on to an end as soon as it can.
+            between = min(y - YMIN, YMAX - y) > 5
 
             # Why the bowl is not moving although a hand is near, logged when it changes.
             hold = None
-            if not moving and not reaching:
+            if not moving and not reaching and not between:
                 if dist < a.trigger:
                     hold = (f"holding: hand still at {dist:.0f} mm, must come within "
                             f"{max(ref - a.hyst, rail.radius):.0f} mm")
@@ -397,29 +414,38 @@ def main() -> int:
                     hold = "holding: hand below the rim at the bowl"
 
             if pending is not None and not moving:
-                # Second half of a feint: dart back, unless a low hand is now in the way.
-                if path_blocked(low, (pending - y) * rail.scale, rail.radius) or state["banner"]:
+                # Second half of a feint: dart back, unless a low hand is now in the way, or a hand
+                # is over the spot it would go back to (it did not follow, and the bowl would land
+                # under it). Called off, the bowl is between the ends and goes on to one.
+                travel = (pending - y) * rail.scale
+                if path_blocked(low, travel, rail.radius) or state["banner"]:
                     say("feint: return cancelled, hand in the way")
+                elif over_spot(reach, travel, rail.radius):
+                    say("feint: return cancelled, a hand is over the spot it would go back to")
                 else:
                     axis.move(pending, a.speed, a.accel)
                     state["text"] = f"FEINT back to Y{pending:.0f}"
                     moving = True
                 pending = None
-            elif reaching and not moving and state["enabled"] and not state["banner"]:
-                p = min(reach, key=lambda q: np.hypot(q[0], q[1]))
-                target = dodge_target(y, p[0])
+            elif (reaching or between) and not moving and state["enabled"] and not state["banner"]:
+                p = min(reach, key=lambda q: np.hypot(q[0], q[1])) if reach else None
+                target = (dodge_target(y, p[0]) if p is not None
+                          else YMIN if y - YMIN < YMAX - y else YMAX)
                 if abs(target - y) <= 5:
                     hold = "holding: cornered at the end of the rail"
                 elif path_blocked(low, (target - y) * rail.scale, rail.radius):
                     hold = "holding: hand below the rim in the bowl's path"
+                elif not reaching:
+                    axis.move(target, a.speed, a.accel)
+                    state["text"] = f"ON TO Y{target:.0f}"
+                    say(f"on to an end: stopped at Y{y:.0f}, going to Y{target:.0f}")
                 else:
                     seen_at = max(s0, s1)  # when the newer of the two frames was taken
                     kind = "dodge"
                     if rng.random() < a.feint:
-                        # Feint: only part of the way, then back near where it started.
-                        back = min(max(y + np.sign(y - target) * rng.uniform(0, 40), YMIN), YMAX)
+                        # Feint: only part of the way, then back to the end it came from.
+                        pending = YMIN if target > y else YMAX
                         target = y + (target - y) * rng.uniform(0.4, 0.8)
-                        pending = back
                         kind = "feint"
                     axis.move(target, a.speed, a.accel)
                     state["text"] = f"{kind.upper()} to Y{target:.0f}"
