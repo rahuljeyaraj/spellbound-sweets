@@ -1,6 +1,6 @@
 """Find the bowl's rim from the lid card, once. Run bowl_calibrate.py first.
 
-    uv run python scripts/make_marker.py --lid 150      # print calib/lid.pdf, cut the circle
+    uv run python scripts/make_marker.py --lid 145      # print calib/lid.pdf, cut the circle
     uv run python scripts/rim_calibrate.py --radius 75  # lid card centred on the bowl
 
 The bowl is fixed to the slider, so its rim is always in the same place relative to the base
