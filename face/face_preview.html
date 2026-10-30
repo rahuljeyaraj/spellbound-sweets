@@ -1,0 +1,439 @@
+<title>Spellbound Creature Face</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Pirata+One&family=Chakra+Petch:wght@400;600&display=swap">
+<style>
+/* Layout: one dark bench, the face board centred, option and mood controls and readouts beneath. Single dark look on purpose: LEDs read best on black. */
+:root {
+  --bg: #0d0b0a;
+  --wood: #2a1a10;
+  --ink: #efe3d4;
+  --muted: #9a8a7a;
+  --accent: #ff3a12;
+  --line: #3a2a1e;
+  --display: "Pirata One", "Georgia", serif;
+  --ui: "Chakra Petch", "Segoe UI", system-ui, sans-serif;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body {
+  background: var(--bg); color: var(--ink); font-family: var(--ui);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 20px 32px;
+}
+.wrap { max-width: 760px; margin: 0 auto; display: grid; gap: 16px; }
+h1 { font-family: var(--display); font-weight: 400; font-size: 2.4rem; margin: 0; color: var(--accent); letter-spacing: .02em; line-height: 1; }
+.sub { margin: 4px 0 0; color: var(--muted); font-size: .95rem; max-width: 62ch; }
+.stage { background: var(--wood); border: 1px solid var(--line); border-radius: 6px; padding: 10px; }
+canvas { display: block; width: 100%; max-width: 100%; height: auto; touch-action: none; cursor: crosshair; border-radius: 3px; }
+.group { display: grid; gap: 8px; }
+.group h2 { margin: 0; font: 600 .78rem var(--ui); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.btns { display: flex; flex-wrap: wrap; gap: 8px; }
+.btns button {
+  font: 600 .95rem var(--ui); color: var(--ink); background: transparent;
+  border: 1px solid var(--line); border-radius: 999px; padding: 8px 16px; cursor: pointer;
+}
+.btns button[aria-pressed="true"] { background: var(--accent); color: #140402; border-color: var(--accent); }
+.btns button:focus-visible, input:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.row { display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: center; font-size: .9rem; color: var(--muted); }
+.row label { display: flex; gap: 10px; align-items: center; }
+.row output, .stat b { color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 600; }
+input[type=range] { accent-color: var(--accent); width: 150px; }
+.when { margin: 0; font-size: 1.05rem; line-height: 1.5; min-height: 4.5em; max-width: 65ch; }
+.note { color: var(--muted); font-size: .85rem; max-width: 65ch; margin: 0; line-height: 1.5; }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Creature Face</h1>
+    <p class="sub">Your two 16-LED rings and the 16 by 8 mouth, shown LED for LED. Move your pointer over the bench as the hand. Reach into the bowl and it snarls.</p>
+  </header>
+
+  <div class="stage"><canvas id="cv" width="900" height="1000" aria-label="Simulated LED face"></canvas></div>
+
+  <p id="when" class="when" aria-live="polite"></p>
+
+  <div class="group">
+    <h2>Mood</h2>
+    <div class="btns" id="moods" role="group" aria-label="Mood">
+      <button id="m-auto" data-mood="auto" aria-pressed="true">Auto</button>
+      <button id="m-wait" data-mood="waiting" aria-pressed="false">Waiting</button>
+      <button id="m-watch" data-mood="watching" aria-pressed="false">Watching</button>
+      <button id="m-snarl" data-mood="snarl" aria-pressed="false">Snarl</button>
+      <button id="m-slack" data-mood="slack" aria-pressed="false">Gives up</button>
+    </div>
+  </div>
+
+  <div class="row">
+    <label for="bright">Brightness <input id="bright" type="range" min="5" max="100" value="25"> <output id="bright-out">25%</output></label>
+    <span class="stat">LEDs lit: <b id="lit-out">0</b> of 160</span>
+    <span class="stat">Draw: <b id="amp-out">0.00 A</b> at 5 V</span>
+  </div>
+
+  <p class="note">Chosen: sleeping for waiting, clenched teeth with level brows for watching, the snapping jaw for snarl, crying for gives up. Each mood loops for as long as it lasts. Ring LED 0 is drawn at the top, counting clockwise; the real rings may start somewhere else. The draw figure assumes about 20 mA per colour at full brightness.</p>
+</div>
+
+<script>
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+const P = 44;                       // LED pitch on the mouth, in canvas px
+const CX = W / 2, EYE_Y = 190;
+const EYES = [{ x: CX - 5.6 * P, y: EYE_Y, side: -1 }, { x: CX + 5.6 * P, y: EYE_Y, side: 1 }];
+const RING_R = 3.5 * P, RING_N = 16;
+const MOUTH_X = CX - 7.5 * P, MOUTH_Y = EYE_Y + 6.6 * P;
+const BOWL = { x: CX, y: H - 80, r: 120 };
+
+// The snarl mouth, 16 wide by 8 tall. o = lip, T = tooth.
+const OPEN = [
+  '.oooooooooooooo.',
+  'oTTT.TTT.TTT.TTo',
+  'o.T...T...T...To',
+  'o..............o',
+  'o..............o',
+  'o..T...T...T...o',
+  'o.TTT.TTT.TTT..o',
+  '.oooooooooooooo.'];
+// Sad mouths, # = line
+const FROWN = [
+  '................',
+  '................',
+  '................',
+  '.....######.....',
+  '...##......##...',
+  '..#..........#..',
+  '.#............#.',
+  '................'];
+const WAIL = [
+  '................',
+  '.....######.....',
+  '...##......##...',
+  '..#..........#..',
+  '..#..........#..',
+  '...##......##...',
+  '.....######.....',
+  '................'];
+
+// Place the upper jaw at row topY and the lower jaw at row botY. Where they overlap the teeth interlock.
+function jaw(topY, botY) {
+  const g = Array.from({ length: 8 }, () => Array(16).fill('.'));
+  const put = (r, src) => {
+    if (r < 0 || r > 7) return;
+    for (let x = 0; x < 16; x++) {
+      const c = src[x];
+      if (c === 'T' || (c === 'o' && g[r][x] !== 'T')) g[r][x] = c;
+    }
+  };
+  for (let i = 0; i < 3; i++) put(topY + i, OPEN[i]);
+  for (let i = 0; i < 3; i++) put(botY + i, OPEN[5 + i]);
+  for (let r = topY + 3; r < botY; r++) put(r, 'o..............o');
+  return g.map(r => r.join(''));
+}
+const SHUT = jaw(1, 4), AJAR = jaw(1, 5), WIDE = jaw(0, 5);
+
+const grid = pic => pic.map(r => r.split(''));
+const ungrid = g => g.map(r => r.join(''));
+const shift = (pic, dy) => pic.map((_, y) => pic[y - dy] ?? '................');
+const setPx = (g, x, y, ch) => { if (y >= 0 && y < 8 && x >= 0 && x < 16) g[y][x] = ch; };
+const hsv = (h, s = 1, v = 1) => {
+  const f = n => { const k = (n + h * 6) % 6; return v - v * s * Math.max(0, Math.min(k, 4 - k, 1)); };
+  return [f(5) * 255, f(3) * 255, f(1) * 255];
+};
+const wave = (t, period) => 0.5 + 0.5 * Math.sin(t * 2 * Math.PI / period);
+
+const RED = [255, 20, 0], TOOTH = [255, 215, 170], PURPLE = [150, 0, 255], AMBER = [255, 140, 0];
+const BLUE = [20, 60, 255], CYAN = [0, 210, 255], TEAR = [160, 235, 255];
+
+// Eye spec: c pupil colour, base glow (in baseC), w pupil width, gaze, brow ('angry' or 'sad') in browC,
+// lid (lower lid in brow colour), spin (pupils circle), extra (side => [[ring index, colour, strength]]),
+// ring (side => 16 colours, or null to draw the normal eye).
+// Mouth spec: pic, colors (char => colour, or (x, y) => colour), k brightness.
+
+const WATCHING = t => ({
+  eye: { c: AMBER, base: .04, brow: 'flat', browC: PURPLE, browV: .6, gaze: 'follow', k: 1 },
+  mouth: { pic: SHUT, colors: { o: RED, T: TOOTH }, k: .75 + .15 * Math.sin(t * 9) },
+});
+
+const SNARL = t => ({
+  eye: { c: [255, 230, 0], base: .03, w: 1.1, brow: 'angry', browC: [255, 0, 0], browV: .85, gaze: 'follow', k: .9 + .1 * Math.random() },
+  mouth: { pic: Math.sin(t * 7) > -0.2 ? WIDE : SHUT, colors: { o: RED, T: TOOTH }, k: .85 + .15 * Math.random() },
+});
+
+const WAITS = {
+  sleeping: t => {
+    // snores with its eyes shut; every ten seconds one eye peeks open and checks the room, left then right
+    const b = wave(t, 3);
+    const peek = t % 10 > 7;
+    const peekSide = Math.floor(t / 10) % 2 ? 1 : -1;
+    const closed = Array.from({ length: RING_N }, (_, k) => [6, 7, 8, 9, 10].includes(k) ? BLUE.map(v => v * (.35 + .5 * b)) : null);
+    return {
+      eye: { c: AMBER, base: .03, brow: 'flat', browC: PURPLE, browV: .5, gaze: 'peek', k: 1,
+             ring: side => (peek && side === peekSide) ? null : closed },
+      mouth: { pic: b > .6 ? AJAR : SHUT, colors: { o: [120, 0, 220], T: [120, 150, 255] }, k: .3 + .4 * b },
+    };
+  },
+  potion: t => {
+    // green eyes drift about; the teeth shimmer like a potion and drip green drool
+    const g = grid(SHUT);
+    const drop = (t * 4) % 7;                 // falls from the tooth tip, then a short pause
+    if (drop < 5) setPx(g, 6, 3 + Math.floor(drop), 'd');
+    const drop2 = (t * 4 + 3.5) % 7;
+    if (drop2 < 5) setPx(g, 10, 3 + Math.floor(drop2), 'd');
+    return {
+      eye: { c: [0, 255, 60], base: .06, baseC: PURPLE, brow: 'angry', browC: PURPLE, browV: .5, gaze: 'wander', k: 1 },
+      mouth: { pic: ungrid(g), k: 1, colors: {
+        o: [140, 0, 255],
+        T: (x, y) => hsv(.3 + .08 * Math.sin(x * .6 - t * 3), 1, .55 + .45 * wave(t * 3 - x * .3, 2)),
+        d: [80, 255, 120] } },
+    };
+  },
+  licking: t => {
+    // the jaw hangs ajar and a pink tongue slides along the teeth
+    const g = grid(AJAR);
+    const tx = 7.5 + 5 * Math.sin(t * 1.6);
+    for (let x = 1; x < 15; x++) if (Math.abs(x - tx) < 1.6) g[4][x] = 'g';
+    return {
+      eye: { c: [255, 230, 0], base: .04, brow: 'angry', browC: [255, 70, 0], browV: .55, gaze: 'wander', k: 1 },
+      mouth: { pic: ungrid(g), colors: { o: RED, T: TOOTH, g: [255, 30, 120] }, k: .8 },
+    };
+  },
+};
+
+const SLACKS = {
+  crying: t => {
+    // blue and sad: tears roll round the rings and stream down over the mouth, the lip trembles
+    const g = grid((t % 2 < .7 && Math.floor(t * 8) % 2) ? shift(FROWN, 1) : FROWN);
+    for (const [x, off] of [[2, 0], [13, 4.5]]) {
+      const y = Math.floor((t * 6 + off) % 10) - 1;
+      setPx(g, x, y, 'd'); setPx(g, x, y - 1, 'e');
+    }
+    const tear = (side, off) => {
+      const ph = ((t + off) % 1.6) / 1.6;
+      return [[side < 0 ? 12 - 4 * ph : 4 + 4 * ph, TEAR, 1.2]];
+    };
+    return {
+      eye: { c: BLUE, base: .05, brow: 'sad', browC: CYAN, browV: .55, gaze: 'down', k: 1,
+             extra: side => tear(side, side < 0 ? 0 : .8) },
+      mouth: { pic: ungrid(g), colors: { '#': BLUE, d: TEAR, e: [40, 90, 160] }, k: .9 },
+    };
+  },
+  sobbing: t => {
+    // three heaving sobs then a pause: the mouth wails open, the shut eyes squeeze, all in blue
+    const ph = t % 2.6;
+    const heave = ph < 1.5 && (ph % .5) < .28;
+    const ring = side => Array.from({ length: RING_N }, (_, k) => {
+      if ([6, 7, 8, 9, 10].includes(k)) return BLUE.map(v => v * (heave ? 1 : .55));
+      if ((side < 0 ? [13, 14, 15, 0] : [0, 1, 2, 3]).includes(k)) return CYAN.map(v => v * (heave ? .9 : .45));
+      return null;
+    });
+    return {
+      eye: { c: BLUE, k: 1, ring },
+      mouth: { pic: heave ? WAIL : FROWN, colors: { '#': heave ? CYAN : BLUE }, k: heave ? 1 : .6 },
+    };
+  },
+  woozy: t => {
+    // dazed: pupils circle slowly in opposite directions, the mouth is a wobbling wave of blue to purple
+    const g = Array.from({ length: 8 }, () => Array(16).fill('.'));
+    for (let x = 0; x < 16; x++) setPx(g, x, 4 + Math.round(1.5 * Math.sin(x * .7 + t * 4)), '#');
+    return {
+      eye: { c: BLUE, base: .05, baseC: [90, 0, 200], w: 1, k: 1, spin: t * 4 },
+      mouth: { pic: ungrid(g), colors: { '#': (x, y) => hsv(.62 + .15 * wave(x / 3 + t, 2), 1, 1) }, k: .9 },
+    };
+  },
+};
+
+const WHEN = {
+  waiting:  'Waiting: nobody\'s hand is on the table.',
+  watching: 'Watching: a hand is on the table but not at the bowl yet. Both eyes follow it, teeth clenched.',
+  snarl:    'Snarl: a hand reaches into the bowl. The bowl dodges away and the face growls.',
+  slack:    'Gives up: the child has done all three spell signs. The bowl stops in the middle and the face is beaten, so they can take a sweet.',
+};
+const WAIT_TEXT = { sleeping: ' It snores with its eyes shut. Every ten seconds one eye peeks open, left and right in turn.',
+                    potion: ' Green eyes drift about and green potion drool drips from its teeth.',
+                    licking: ' It looks around and licks its teeth with a pink tongue.' };
+const SLACK_TEXT = { crying: ' It cries blue tears and its lip trembles.',
+                     sobbing: ' It sobs in heaves with its eyes squeezed shut.',
+                     woozy: ' It goes woozy: eyes circling, mouth wobbling.' };
+
+// current LED colours, eased toward targets every frame
+const eyeNow = [new Float32Array(RING_N * 3), new Float32Array(RING_N * 3)];
+const mouthNow = new Float32Array(128 * 3);
+
+let pickMood = 'auto', waitStyle = 'sleeping', slackStyle = 'crying', mood = 'waiting', hand = null;
+let bright = 0.25;
+
+function mouthTarget(m) {
+  const out = new Float32Array(128 * 3);
+  for (let y = 0; y < 8; y++) for (let x = 0; x < 16; x++) {
+    let c = m.colors[m.pic[y][x]];
+    if (typeof c === 'function') c = c(x, y);
+    if (!c) continue;
+    const i = (y * 16 + x) * 3;
+    out[i] = c[0] * m.k; out[i + 1] = c[1] * m.k; out[i + 2] = c[2] * m.k;
+  }
+  return out;
+}
+
+// keep the pupil off the brow at the top of the ring
+function underBrow(p) {
+  if (p > 4.5 && p < 11.5) return p;
+  if (p >= 11.5) return (p - 11.5 < 16 - p + 4.5) ? 11.5 : 4.5;
+  return (4.5 - p < p + 16 - 11.5) ? 4.5 : 11.5;
+}
+
+function eyeTarget(e, s, t) {
+  const out = new Float32Array(RING_N * 3);
+  const add = (k, c, v) => { k = ((k % RING_N) + RING_N) % RING_N; out[k * 3] += c[0] * v; out[k * 3 + 1] += c[1] * v; out[k * 3 + 2] += c[2] * v; };
+  const blob = (idx, c, v, w) => {
+    idx = ((idx % RING_N) + RING_N) % RING_N;
+    for (let k = 0; k < RING_N; k++) {
+      let d = Math.abs(k - idx); d = Math.min(d, RING_N - d);
+      add(k, c, v * Math.exp(-((d / w) ** 2)));
+    }
+  };
+  const fixed = s.ring && s.ring(e.side);
+  if (fixed) fixed.forEach((c, k) => { if (c) add(k, c, 1); });
+  else {
+    let pupil;
+    if (s.spin !== undefined) pupil = 8 + e.side * s.spin;
+    else {
+      let ang;                                 // screen angle the pupil points to
+      if (s.gaze === 'down') ang = Math.PI / 2 + 0.2 * Math.sin(t * 0.8);
+      else if (s.gaze === 'follow' && hand) ang = Math.atan2(hand.y - EYE_Y, hand.x - CX);   // both eyes aim from the face centre
+      else if (s.gaze === 'peek') ang = Math.PI / 2 + 1.1 * Math.sin(t * 2.2);
+      else ang = Math.PI / 2 + 1.3 * Math.sin(t * 0.35) + 0.4 * Math.sin(t * 0.9);
+      pupil = ((ang + Math.PI / 2) / (2 * Math.PI) * RING_N + RING_N * 2) % RING_N;
+      if (s.brow) pupil = underBrow(pupil);
+    }
+    for (let k = 0; k < RING_N; k++) add(k, s.baseC || s.c, s.base || 0);
+    blob(pupil, s.c, 1, s.w || 0.8);
+    if (s.brow) {
+      // angry brows slope down toward the nose, sad ones down toward the outside, flat ones sit level on top
+      const inner = e.side < 0 ? [0, 1, 2, 3] : [13, 14, 15, 0];
+      const outer = e.side < 0 ? [13, 14, 15, 0] : [0, 1, 2, 3];
+      const brow = s.brow === 'angry' ? inner : s.brow === 'sad' ? outer : [14, 15, 0, 1, 2];
+      brow.forEach(k => add(k, s.browC, s.browV));
+    }
+  }
+  if (s.extra) s.extra(e.side).forEach(([idx, c, v]) => blob(idx, c, v, .6));
+  for (let i = 0; i < out.length; i++) out[i] = Math.min(255, out[i] * s.k);
+  return out;
+}
+
+function ease(now, target, a) { for (let i = 0; i < now.length; i++) now[i] += (target[i] - now[i]) * a; }
+
+function chooseMood() {
+  if (pickMood !== 'auto') return pickMood;
+  if (!hand) return 'waiting';
+  const inBowl = Math.hypot(hand.x - BOWL.x, hand.y - BOWL.y) < BOWL.r * 1.25;
+  return inBowl ? 'snarl' : 'watching';
+}
+
+function led(x, y, r, g, b, size) {
+  const s = size / 2;
+  ctx.fillStyle = '#1b1b1b'; ctx.fillRect(x - s, y - s, size, size);       // the 5050 package
+  ctx.fillStyle = '#e9e4dc'; ctx.globalAlpha = .12; ctx.fillRect(x - s * .55, y - s * .55, s * 1.1, s * 1.1); ctx.globalAlpha = 1;
+  const lum = (r + g + b) / 765;
+  if (lum < 0.004) return;
+  const gl = ctx.createRadialGradient(x, y, 0, x, y, size * 1.6);
+  gl.addColorStop(0, `rgba(${r},${g},${b},${Math.min(1, lum * 3)})`);
+  gl.addColorStop(0.35, `rgba(${r},${g},${b},${Math.min(.6, lum * 1.6)})`);
+  gl.addColorStop(1, `rgba(${r},${g},${b},0)`);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.fillStyle = gl; ctx.fillRect(x - size * 1.6, y - size * 1.6, size * 3.2, size * 3.2);
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+// LEDs look brighter on screen than their raw value; lift low values so 25% still reads
+const show = v => Math.round(255 * Math.pow(Math.min(1, v / 255), 0.6));
+
+function draw() {
+  ctx.fillStyle = '#060504'; ctx.fillRect(0, 0, W, H);
+
+  // ring boards
+  for (const e of EYES) {
+    ctx.beginPath(); ctx.arc(e.x, e.y, RING_R + 0.5 * P, 0, Math.PI * 2);
+    ctx.arc(e.x, e.y, RING_R - 0.5 * P, 0, Math.PI * 2, true);
+    ctx.fillStyle = '#0b0b0b'; ctx.fill();
+  }
+  // mouth boards
+  ctx.fillStyle = '#0b0b0b';
+  ctx.fillRect(MOUTH_X - 0.55 * P, MOUTH_Y - 0.55 * P, 8 * P - 0.05 * P, 8.1 * P);
+  ctx.fillRect(MOUTH_X + 7.55 * P, MOUTH_Y - 0.55 * P, 8 * P - 0.05 * P, 8.1 * P);
+
+  let lit = 0, sum = 0;
+  const count = (r, g, b) => { if (r + g + b > 6) lit++; sum += r + g + b; };
+
+  EYES.forEach((e, n) => {
+    const c = eyeNow[n];
+    for (let k = 0; k < RING_N; k++) {
+      const a = -Math.PI / 2 + k * 2 * Math.PI / RING_N;
+      const r = c[k * 3] * bright, g = c[k * 3 + 1] * bright, b = c[k * 3 + 2] * bright;
+      count(r, g, b);
+      led(e.x + RING_R * Math.cos(a), e.y + RING_R * Math.sin(a), show(r), show(g), show(b), P * 0.5);
+    }
+  });
+  for (let y = 0; y < 8; y++) for (let x = 0; x < 16; x++) {
+    const i = (y * 16 + x) * 3;
+    const r = mouthNow[i] * bright, g = mouthNow[i + 1] * bright, b = mouthNow[i + 2] * bright;
+    count(r, g, b);
+    led(MOUTH_X + x * P, MOUTH_Y + y * P, show(r), show(g), show(b), P * 0.5);
+  }
+
+  // bowl
+  ctx.strokeStyle = 'rgba(239,227,212,.25)'; ctx.lineWidth = 2; ctx.setLineDash([6, 6]);
+  ctx.beginPath(); ctx.ellipse(BOWL.x, BOWL.y, BOWL.r, BOWL.r * 0.38, 0, 0, Math.PI * 2); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = 'rgba(239,227,212,.35)'; ctx.font = '600 18px "Chakra Petch", sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('bowl of sweets', BOWL.x, BOWL.y + 6);
+
+  // hand
+  if (hand) {
+    ctx.beginPath(); ctx.arc(hand.x, hand.y, 22, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(239,227,212,.7)'; ctx.lineWidth = 2; ctx.stroke();
+  }
+
+  document.getElementById('lit-out').textContent = lit;
+  document.getElementById('amp-out').textContent = (sum / 255 * 0.02).toFixed(2) + ' A';
+  const text = WHEN[mood] + (mood === 'waiting' ? WAIT_TEXT[waitStyle] : mood === 'slack' ? SLACK_TEXT[slackStyle] : '');
+  const when = document.getElementById('when');
+  if (when.textContent !== text) when.textContent = text;
+}
+
+const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+function frame(ms) {
+  const t = reduced ? 0 : ms / 1000;
+  mood = chooseMood();
+  const s = mood === 'snarl' ? SNARL(t)
+          : mood === 'watching' ? WATCHING(t)
+          : mood === 'waiting' ? WAITS[waitStyle](t)
+          : SLACKS[slackStyle](t);
+  const a = mood === 'snarl' ? 0.45 : 0.3;
+  EYES.forEach((e, n) => ease(eyeNow[n], eyeTarget(e, s.eye, t), a));
+  ease(mouthNow, mouthTarget(s.mouth), a);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+function toCanvas(ev) {
+  const r = cv.getBoundingClientRect();
+  return { x: (ev.clientX - r.left) * W / r.width, y: (ev.clientY - r.top) * H / r.height };
+}
+cv.addEventListener('pointermove', ev => { hand = toCanvas(ev); });
+cv.addEventListener('pointerdown', ev => { hand = toCanvas(ev); });
+cv.addEventListener('pointerleave', () => { hand = null; });
+
+function pressGroup(id, onPick) {
+  const btns = document.querySelectorAll(`#${id} button`);
+  btns.forEach(b => b.addEventListener('click', () => {
+    onPick(b);
+    btns.forEach(o => o.setAttribute('aria-pressed', String(o === b)));
+  }));
+}
+pressGroup('moods', b => { pickMood = b.dataset.mood; });
+
+const br = document.getElementById('bright');
+br.addEventListener('input', () => { bright = br.value / 100; document.getElementById('bright-out').textContent = br.value + '%'; });
+
+requestAnimationFrame(frame);
+</script>
