@@ -46,11 +46,13 @@ def make_detector() -> cv2.aruco.ArucoDetector:
 
 
 def find_markers(det: cv2.aruco.ArucoDetector, frame: np.ndarray) -> dict[int, np.ndarray]:
-    """Marker id -> its four corners in pixels (4, 2), for the ids we printed."""
+    """Marker id -> its four corners in pixels (4, 2), for the ids we printed. An id seen twice is
+    left out: the two cameras could each keep a different copy and pair the wrong markers."""
     corners, ids, _ = det.detectMarkers(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
     if ids is None:
         return {}
-    return {int(i): c.reshape(4, 2) for i, c in zip(ids.ravel(), corners) if int(i) in MARKERS_MM}
+    ids = [int(i) for i in ids.ravel()]
+    return {i: c.reshape(4, 2) for i, c in zip(ids, corners) if i in MARKERS_MM and ids.count(i) == 1}
 
 
 def match_markers(cal: Calibration, m0: dict[int, np.ndarray], m1: dict[int, np.ndarray]

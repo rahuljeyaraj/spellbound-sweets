@@ -4,7 +4,7 @@
     uv run python scripts/rim_calibrate.py --radius 75  # lid card centred on the bowl
 
 The bowl is fixed to the slider, so its rim is always in the same place relative to the base
-marker. Lay the lid card (marker 0 in the middle) flat on the rim, centred, and run this. It
+marker. Lay the lid card (marker 2 in the middle) flat on the rim, centred, and run this. It
 measures both markers over many frames and saves where the lid centre is from the base marker:
 along the rail, across it and up (using the rail directions from bowl_calibrate.py). After that
 the lid can go; hand3d.py draws the rim wherever the base marker is.
@@ -23,10 +23,9 @@ import cv2
 import numpy as np
 
 from bowl_calibrate import BOWL_FILE, Viewer, hold, make_detector, measure
-from stereo import CALIB_DIR, CALIB_FILE, WIDTH, HEIGHT, Calibration, open_cameras, wait_for_frames
+from stereo import CALIB_DIR, CALIB_FILE, HEIGHT, LID_ID, MARKERS_MM, WIDTH, Calibration, open_cameras, wait_for_frames
 
 RIM_FILE = CALIB_DIR / "rim.npz"
-LID_ID = 0
 
 
 def rail_frame(step: np.ndarray, up: np.ndarray) -> np.ndarray:
@@ -77,7 +76,7 @@ def main() -> int:
         side = float(np.linalg.norm(np.roll(lid, -1, axis=0) - lid, axis=1).mean())
         v.say(f"rim centre from marker {base_id}: along the rail {along:+.0f} mm, across {across:+.0f} mm, "
               f"up {up:+.0f} mm")
-        v.say(f"lid tilt {tilt:.1f} deg from the bed (should be near 0); lid marker {side:.1f} mm (printed 50); "
+        v.say(f"lid tilt {tilt:.1f} deg from the bed (should be near 0); lid marker {side:.1f} mm (printed {MARKERS_MM[LID_ID]:g}); "
               f"errors {errs[base_id]:.1f} / {errs[LID_ID]:.1f} px")
         np.savez(RIM_FILE, base_id=base_id, offset=np.array([along, across, up]), radius=a.radius,
                  stamp=time.time())

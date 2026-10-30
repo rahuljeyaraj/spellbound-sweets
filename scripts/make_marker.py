@@ -17,7 +17,7 @@ import argparse
 import cv2
 
 from make_board import PT, write_pdf
-from stereo import MARKER_DICT, MARKERS_MM
+from stereo import LID_ID, MARKER_DICT, MARKERS_MM
 
 GAP_MM = 30.0  # space between the markers on the page
 
@@ -62,9 +62,9 @@ def draw_marker(marker_id: int, size: float, band: float, x0: float, y0: float) 
 
 
 def draw_lid(diameter: float, cx: float, cy: float) -> list[str]:
-    """Marker 0 centred in a grey cut circle, with ticks at the circle's top and bottom."""
-    size = MARKERS_MM[0]
-    ops = draw_marker(0, size, 0.0, cx - size / 2, cy - size / 2)[:-2]  # no square cut line or label
+    """The lid marker centred in a grey cut circle, with ticks at the circle's top and bottom."""
+    size = MARKERS_MM[LID_ID]
+    ops = draw_marker(LID_ID, size, 0.0, cx - size / 2, cy - size / 2)[:-2]  # no square cut line or label
     r, k = diameter / 2 * PT, diameter / 2 * PT * 0.5523  # four Bezier quarter arcs
     x, y = cx * PT, cy * PT
     ops.append(f"0.6 G 0.3 w {x + r:.3f} {y:.3f} m "
@@ -75,7 +75,7 @@ def draw_lid(diameter: float, cx: float, cy: float) -> list[str]:
     for s in (1, -1):
         ops.append(f"{x:.3f} {y + s * r:.3f} m {x:.3f} {y + s * (r - 8 * PT):.3f} l S")
     ops.append(f"0 g BT /F1 9 Tf {(cx - 45) * PT:.3f} {(cy - diameter / 2 - 8) * PT:.3f} Td "
-               f"(lid: marker 0, square {size:g} mm, circle {diameter:g} mm across, cut on the grey line) Tj ET")
+               f"(lid: marker {LID_ID}, square {size:g} mm, circle {diameter:g} mm across, cut on the grey line) Tj ET")
     return ops
 
 
