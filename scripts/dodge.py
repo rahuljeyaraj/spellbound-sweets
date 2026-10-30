@@ -22,9 +22,8 @@ is in the bowl or in its path, the bowl stays put: moving into a hand made it lo
 near, the bowl drifts back to the middle slowly.
 
 Lost steps: whenever the bowl is still, the base marker's position is compared with the axis.
-If they differ by more than --slip mm, the board is told the bed's real position (G92, no
-move) and dodging goes on. Only if the marker says the bed is off the rail does dodging stop
-(red banner) until h re-homes. 800 mm/s at 8000 mm/s2 with the bowl lost steps on long moves
+If they differ by more than --slip mm, it re-homes by itself (about 3 s) and goes on. (Not
+G92: Marlin shifts its soft limits with it, so a stall point became a wall.) 800 mm/s at 8000 mm/s2 with the bowl lost steps on long moves
 (2026-10-30); 700 at 7000 was the last clean bench speed with weight on.
 
 Keys: q quit, h re-home, d dodging on or off.
@@ -322,15 +321,15 @@ def main() -> int:
             elif m and now - still_since > 0.3 and rail.base_id in marks and not state["banner"]:
                 seen_y = rail.marker_y(marks[rail.base_id][0].mean(axis=0))
                 if abs(seen_y - y) > a.slip:
-                    # Lost steps: tell the board where the bed really is, from the marker. No move.
-                    if YMIN - 10 < seen_y < YMAX + 10:
-                        m.send(f"G92 Y{seen_y:.1f}")
-                        axis = Axis(m, seen_y)
-                        slips += 1
-                        say(f"lost steps: axis said Y{y:.0f}, marker says Y{seen_y:.0f}; corrected ({slips} so far)")
-                    else:
-                        state["banner"] = f"marker says Y{seen_y:.0f}, off the rail: press h to re-home"
-                        say(state["banner"])
+                    # Lost steps: re-home. Not G92: Marlin moves the soft limits with it, so the
+                    # spot where the bowl stalled became a wall it would not pass.
+                    slips += 1
+                    say(f"lost steps: axis said Y{y:.0f}, marker says Y{seen_y:.0f}; re-homing ({slips} so far)")
+                    state["text"] = "re-homing"
+                    home(m, idle_show)
+                    axis = Axis(m, 20.0)
+                    axis.move(a.rest, 100, 1000)
+                    state["text"] = "watching"
 
             # Hysteresis: after a move, the hand must come --hyst mm closer than it has been since
             # (ref follows the hand's furthest distance) before the next dodge. A hand hovering
