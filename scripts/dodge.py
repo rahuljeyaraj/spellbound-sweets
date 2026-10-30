@@ -23,12 +23,12 @@ and until the hand has come --hyst mm closer than it has been since (so a hand h
 the ends does not send the bowl back and forth); a hand over the opening always counts. A
 dropped frame or two does not reset that; only half a second with no hand does.
 
-Feints (off unless --feint is given): a random --feint share of dodges go only 40 to 80% of the
-way, then dart back to the end they came from, so a hand that has learned to follow it is caught
-out. The return is called off if a hand below the rim is in its way, or a hand is over the spot it
-would go back to (that hand did not follow, and the bowl would land under it); the bowl then goes
-on to an end instead. On the bench (2026-10-30) every return was called off, so a feint was just
-a dodge in two steps; hence off.
+Feints: a random --feint share of dodges go only to the middle of the rail, then dart straight
+back to the end they came from, so a hand that has learned to follow it is caught out. It goes
+back even if a hand is waiting over that end: a hand over the opening always triggers, so the
+bowl dodges away again at once. Only a hand below the rim in its way calls the return off; the
+bowl then goes on to an end instead. (Calling it off for a hand over the end as well made every
+feint stop in the middle and go on in two steps.)
 Hand points below the rim never trigger a dodge, and if one is in the bowl or in its path, the
 bowl stays put: moving into a hand made it lose steps.
 Lost steps: whenever the bowl is still, the base marker's position is compared with the axis.
@@ -169,12 +169,6 @@ def path_blocked(low: np.ndarray, travel: float, radius: float, margin: float = 
     return bool(np.any((low[:, 0] > lo) & (low[:, 0] < hi) & (np.abs(low[:, 1]) < radius + margin)))
 
 
-def over_spot(reach: list[np.ndarray], travel: float, radius: float, margin: float = 25.0) -> bool:
-    """True if a reaching hand point (rail coordinates) would be over the bowl, or within margin
-    mm of its rim, once the bowl has moved `travel` mm along the rail."""
-    return any(np.hypot(p[0] - travel, p[1]) < radius + margin for p in reach)
-
-
 def home(m: Marlin, show) -> None:
     """Home Y, check the switch has let go, then wait at the home end of the rail."""
     m.send("M204 P500 T500")
@@ -196,8 +190,7 @@ def main() -> int:
     ap.add_argument("--accel", type=float, default=7000, help="dodge acceleration, mm/s^2")
     ap.add_argument("--trigger", type=float, default=250, help="dodge when a hand point is this close, mm")
     ap.add_argument("--height", type=float, default=250, help="...and at most this high above the rim, mm")
-    ap.add_argument("--feint", type=float, default=0.0, help="share of dodges that are feints, 0 to 1 (off: they "
-                    "stopped part way and went on in two steps)")
+    ap.add_argument("--feint", type=float, default=0.3, help="share of dodges that are feints, 0 to 1")
     ap.add_argument("--hyst", type=float, default=50, help="after a move, the hand must come this much closer, mm")
     ap.add_argument("--slip", type=float, default=6.0, help="marker vs axis difference that means lost steps, mm")
     ap.add_argument("--max-err", type=float, default=20.0, help="reject hand pairs above this px error")
@@ -417,14 +410,11 @@ def main() -> int:
                     hold = "holding: hand below the rim at the bowl"
 
             if pending is not None and not moving:
-                # Second half of a feint: dart back, unless a low hand is now in the way, or a hand
-                # is over the spot it would go back to (it did not follow, and the bowl would land
-                # under it). Called off, the bowl is between the ends and goes on to one.
-                travel = (pending - y) * rail.scale
-                if path_blocked(low, travel, rail.radius) or state["banner"]:
+                # Second half of a feint: dart back, even onto a hand waiting there (the bowl dodges
+                # it again at once), unless a low hand is now in the way. Called off, the bowl is
+                # between the ends and goes on to one.
+                if path_blocked(low, (pending - y) * rail.scale, rail.radius) or state["banner"]:
                     say("feint: return cancelled, hand in the way")
-                elif over_spot(reach, travel, rail.radius):
-                    say("feint: return cancelled, a hand is over the spot it would go back to")
                 else:
                     axis.move(pending, a.speed, a.accel)
                     state["text"] = f"FEINT back to Y{pending:.0f}"
@@ -445,10 +435,10 @@ def main() -> int:
                 else:
                     seen_at = max(s0, s1)  # when the newer of the two frames was taken
                     kind = "dodge"
-                    if rng.random() < a.feint:
-                        # Feint: only part of the way, then back to the end it came from.
+                    if not between and rng.random() < a.feint:
+                        # Feint: to the middle of the rail, then back to the end it came from.
                         pending = YMIN if target > y else YMAX
-                        target = y + (target - y) * rng.uniform(0.4, 0.8)
+                        target = (YMIN + YMAX) / 2
                         kind = "feint"
                     axis.move(target, a.speed, a.accel)
                     state["text"] = f"{kind.upper()} to Y{target:.0f}"
