@@ -171,12 +171,17 @@ class Calibration:
         X = cv2.triangulatePoints(P0, P1, u0.reshape(-1, 2).T, u1.reshape(-1, 2).T)
         return (X[:3] / X[3]).T
 
-    def reprojection_error(self, X: np.ndarray, px0: np.ndarray, px1: np.ndarray) -> float:
-        """Mean pixel distance between the 3D points projected back and what each camera saw."""
+    def project(self, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """3D points (N, 3) in camera 0 frame, mm -> pixels (N, 2) in camera 0 and in camera 1."""
         p0, _ = cv2.projectPoints(X, np.zeros(3), np.zeros(3), self.K0, self.D0)
         p1, _ = cv2.projectPoints(X, cv2.Rodrigues(self.R)[0], self.T, self.K1, self.D1)
-        e0 = np.linalg.norm(p0.reshape(-1, 2) - px0, axis=1)
-        e1 = np.linalg.norm(p1.reshape(-1, 2) - px1, axis=1)
+        return p0.reshape(-1, 2), p1.reshape(-1, 2)
+
+    def reprojection_error(self, X: np.ndarray, px0: np.ndarray, px1: np.ndarray) -> float:
+        """Mean pixel distance between the 3D points projected back and what each camera saw."""
+        p0, p1 = self.project(X)
+        e0 = np.linalg.norm(p0 - px0, axis=1)
+        e1 = np.linalg.norm(p1 - px1, axis=1)
         return float((e0.mean() + e1.mean()) / 2)
 
     def to_table(self, X: np.ndarray) -> np.ndarray:
@@ -184,3 +189,9 @@ class Calibration:
         if self.table_R is None:
             return X
         return (X - self.table_t.reshape(1, 3)) @ self.table_R
+
+    def from_table(self, X: np.ndarray) -> np.ndarray:
+        """Table frame (mm) -> camera 0 frame. The reverse of to_table."""
+        if self.table_R is None:
+            return X
+        return X @ self.table_R.T + self.table_t.reshape(1, 3)

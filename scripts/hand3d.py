@@ -212,6 +212,7 @@ class Map:
         # The Y axis from bowl_calibrate.py: where the marker centre runs from Y0 to Y220.
         self.rail = None
         self.rim: tuple[int, np.ndarray, float] | None = None  # base marker id, offset in table mm, radius
+        self.rim_axes: np.ndarray | None = None  # along, across, up the rail, in table coordinates
         if BOWL_FILE.exists():
             b = np.load(BOWL_FILE)
             self.rail = cal.to_table(np.array([b["home"] + y * b["step"] for y in (0.0, 220.0)]))
@@ -219,6 +220,7 @@ class Map:
                 r = np.load(RIM_FILE)
                 axes = rail_frame(b["step"], b["up"]) @ cal.table_R  # rail axes in table coordinates
                 self.rim = int(r["base_id"]), r["offset"] @ axes, float(r["radius"])
+                self.rim_axes = axes
         self.background = self._background()
 
     def px(self, xy: np.ndarray) -> tuple[int, int]:
@@ -231,6 +233,15 @@ class Map:
         if self.rim is None or self.rim[0] not in marks:
             return None
         return marks[self.rim[0]][0].mean(axis=0) + self.rim[1]
+
+    def rim_ring(self, marks: dict[int, tuple[np.ndarray, float]], n: int = 48) -> np.ndarray | None:
+        """Points round the rim in table mm, flat in the bed's plane, if the base marker is seen."""
+        c = self.rim_centre(marks)
+        if c is None:
+            return None
+        t = np.linspace(0, 2 * np.pi, n, endpoint=False)
+        u, v = self.rim_axes[0], self.rim_axes[1]
+        return c + self.rim[2] * (np.outer(np.cos(t), u) + np.outer(np.sin(t), v))
 
     def gy(self, z: float) -> int:
         """Height mm -> graph pixel row."""
@@ -371,6 +382,11 @@ def main() -> None:
             v0, v1 = f0.copy(), f1.copy()
             draw_markers(v0, mk0, marks)
             draw_markers(v1, mk1, marks)
+            ring = table_map.rim_ring(marks) if table_map is not None else None
+            if ring is not None:
+                # The rim as the cameras should see it, worked out from the base marker alone.
+                for v, p in zip((v0, v1), cal.project(cal.from_table(ring))):
+                    cv2.polylines(v, [p.astype(np.int32)], True, (0, 140, 255), 2)
             for h in hands0:
                 draw_hand(v0, h, (0, 0, 255))
             for h in hands1:

@@ -42,6 +42,7 @@ def main() -> int:
     ap.add_argument("--cams", type=int, nargs=2, default=[0, 1], help="camera numbers (2 is OBS)")
     ap.add_argument("--exposure", type=float, help="lock exposure (e.g. -5); default auto")
     ap.add_argument("--frames", type=int, default=40, help="frame pairs to use")
+    ap.add_argument("--hold", type=float, default=0, help="close the window this many s after the end (0: on q)")
     a = ap.parse_args()
 
     cal = Calibration.load()
@@ -82,9 +83,7 @@ def main() -> int:
                  stamp=time.time())
         v.say(f"saved, rim radius {a.radius:g} mm. The lid can come off.")
         v.status = "done: press q to close"
-        while True:
-            v.show()
-            time.sleep(0.02)
+        hold(v, a.hold or float("inf"))
     except KeyboardInterrupt:
         pass
     finally:

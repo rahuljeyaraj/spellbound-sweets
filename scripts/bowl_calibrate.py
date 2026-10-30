@@ -179,6 +179,7 @@ def main() -> int:
     ap.add_argument("--settle", type=float, default=0.7, help="seconds to wait after each stop")
     ap.add_argument("--marker", type=float, nargs=2, action="append", metavar=("ID", "MM"),
                     help="measured black square size of a printed marker, if not as designed")
+    ap.add_argument("--hold", type=float, default=0, help="close the window this many s after the end (0: on q)")
     a = ap.parse_args()
 
     sizes = dict(MARKERS_MM)
@@ -225,9 +226,7 @@ def main() -> int:
 
         ok = report(v, cal, found, sizes, len(a.stops))
         v.status = "done: press q to close"
-        while True:  # keep the window live until q
-            v.show()
-            time.sleep(0.02)
+        hold(v, a.hold or float("inf"))  # keep the window live until q (or --hold seconds)
     except KeyboardInterrupt:
         m.ser.write(b"M410\n")
         print("closed")
