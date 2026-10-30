@@ -60,8 +60,19 @@ class Rail:
         self.scale = float(np.linalg.norm(b["step"]))  # mm moved per mm of Y
         self.home = cal.to_table(b["home"].reshape(1, 3))[0]  # base marker centre at Y0
         self.axes = axes @ cal.table_R  # along, across, up in table coordinates
-        self.rim0 = self.home + r["offset"] @ self.axes  # rim centre at Y0
+        self.rim_offset = r["offset"] @ self.axes  # rim centre from the base marker
+        self.rim0 = self.home + self.rim_offset  # rim centre at Y0
         self.radius = float(r["radius"])
+
+    def anchor(self, centre: np.ndarray, y: float) -> np.ndarray:
+        """Re-place the rail so the base marker centre (table mm) is where it should be at Y=y,
+        e.g. right after homing. Keeps the rail's direction. Returns the shift (along, across,
+        up), mm: how far the printer has moved since bowl_calibrate.py."""
+        new_home = centre - y * self.scale * self.axes[0]
+        shift = (new_home - self.home) @ self.axes.T
+        self.home = new_home
+        self.rim0 = self.home + self.rim_offset
+        return shift
 
     def rim_centre(self, y: float) -> np.ndarray:
         return self.rim0 + y * self.scale * self.axes[0]
@@ -254,6 +265,30 @@ def main() -> int:
                 cv2.circle(mp, table_map.px(rail.rim_centre(y)), int(r * table_map.scale), colour, thick)
             cv2.imshow("dodge", np.vstack([view, mp]))
 
+        def anchor(y_now: float) -> None:
+            """Bed still at a known Y (just homed): measure the base marker and re-place the rail."""
+            seen = []
+            end = time.monotonic() + 3.0
+            while len(seen) < 8 and time.monotonic() < end:
+                got = frame_view()
+                if got is None:
+                    cv2.waitKey(1)
+                    continue
+                marks = match_markers(cal, got[0][0][3], got[1][0][3])
+                draw(got, time.monotonic(), [], marks, [])
+                cv2.waitKey(1)
+                if rail.base_id in marks:
+                    seen.append(marks[rail.base_id][0].mean(axis=0))
+            if len(seen) < 4:
+                say(f"marker {rail.base_id} not seen after homing: rail not re-checked")
+                return
+            along, across, up = rail.anchor(np.median(seen, axis=0), y_now)
+            say(f"anchored on marker: printer moved {along:+.0f} along, {across:+.0f} across, "
+                f"{up:+.0f} up since calibration")
+            if abs(across) > 10 or abs(up) > 10:
+                state["banner"] = "printer moved sideways since calibration: run bowl_calibrate.py"
+                say(state["banner"])
+
         def idle_show() -> None:
             got = frame_view()
             if got is not None:
@@ -270,6 +305,7 @@ def main() -> int:
             m.send(f"M201 Y{a.accel:g}")
             state["text"] = "homing Y"
             home(m, idle_show)
+            anchor(20.0)
             axis = Axis(m, 20.0)
             axis.move(a.rest, 100, 1000)
         say(f"ready: dodge at {a.speed:g} mm/s, {a.accel:g} mm/s2, trigger {a.trigger:g} mm")
@@ -286,6 +322,7 @@ def main() -> int:
             if key == ord("h") and m and not axis.moving(time.monotonic()):
                 state["text"] = "re-homing"
                 home(m, idle_show)
+                anchor(20.0)
                 axis = Axis(m, 20.0)
                 axis.move(a.rest, 100, 1000)
                 state["banner"] = None
@@ -327,6 +364,7 @@ def main() -> int:
                     say(f"lost steps: axis said Y{y:.0f}, marker says Y{seen_y:.0f}; re-homing ({slips} so far)")
                     state["text"] = "re-homing"
                     home(m, idle_show)
+                    anchor(20.0)
                     axis = Axis(m, 20.0)
                     axis.move(a.rest, 100, 1000)
                     state["text"] = "watching"
