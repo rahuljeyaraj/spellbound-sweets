@@ -17,7 +17,7 @@ more than --height mm above the rim, the bowl jumps to whichever end of the rail
 from the hand (only ever the ends: short steps looked like the bowl following the hand). If it
 is already there, it stays. A new dodge waits until the last move has finished, and until the
 hand has come --hyst mm closer than it has been since (so a hand hovering between the ends does
-not send the bowl back and forth). Hand points below the rim never trigger a dodge, and if one
+not send the bowl back and forth); a hand over the opening always counts. Hand points below the rim never trigger a dodge, and if one
 is in the bowl or in its path, the bowl stays put: moving into a hand made it lose steps. After --rest-after seconds with no hand
 near, the bowl drifts back to the middle slowly.
 
@@ -377,13 +377,16 @@ def main() -> int:
                 ref = dist if moving and np.isfinite(dist) else a.trigger + a.hyst
             else:
                 ref = min(a.trigger + a.hyst, max(ref, dist))
-            reaching = dist < a.trigger and dist < ref - a.hyst
+            # A hand over the opening always counts; otherwise a hand that followed the bowl to
+            # its new spot could never come the extra --hyst mm closer.
+            reaching = dist < a.trigger and dist < max(ref - a.hyst, rail.radius)
 
             # Why the bowl is not moving although a hand is near, logged when it changes.
             hold = None
             if not moving and not reaching:
                 if dist < a.trigger:
-                    hold = f"holding: hand still at {dist:.0f} mm, must come within {ref - a.hyst:.0f} mm"
+                    hold = (f"holding: hand still at {dist:.0f} mm, must come within "
+                            f"{max(ref - a.hyst, rail.radius):.0f} mm")
                 elif path_blocked(low, 0.0, rail.radius):
                     hold = "holding: hand below the rim at the bowl"
 
