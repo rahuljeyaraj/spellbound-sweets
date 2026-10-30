@@ -36,6 +36,7 @@ from mediapipe.tasks.python import BaseOptions
 from mediapipe.tasks.python import vision
 
 from bowl_calibrate import BOWL_FILE, draw_markers, find_markers, make_detector, marker_lines, match_markers
+from rim_calibrate import RIM_FILE, rail_frame
 from stereo import (
     BOARD, CALIB_FILE, HEIGHT, ROOT, SQUARE_MM, WIDTH, Calibration, Camera, open_cameras, wait_for_frames,
 )
@@ -210,15 +211,26 @@ class Map:
         self.cams = [cal.to_table(np.zeros((1, 3)))[0], cal.to_table((-cal.R.T @ cal.T).reshape(1, 3))[0]]
         # The Y axis from bowl_calibrate.py: where the marker centre runs from Y0 to Y220.
         self.rail = None
+        self.rim: tuple[int, np.ndarray, float] | None = None  # base marker id, offset in table mm, radius
         if BOWL_FILE.exists():
             b = np.load(BOWL_FILE)
             self.rail = cal.to_table(np.array([b["home"] + y * b["step"] for y in (0.0, 220.0)]))
+            if RIM_FILE.exists():
+                r = np.load(RIM_FILE)
+                axes = rail_frame(b["step"], b["up"]) @ cal.table_R  # rail axes in table coordinates
+                self.rim = int(r["base_id"]), r["offset"] @ axes, float(r["radius"])
         self.background = self._background()
 
     def px(self, xy: np.ndarray) -> tuple[int, int]:
         """Table mm -> map pixel (table Y points up on screen)."""
         d = (np.asarray(xy[:2]) - self.centre) * self.scale
         return int(self.side / 2 + d[0]), int(self.side / 2 - d[1])
+
+    def rim_centre(self, marks: dict[int, tuple[np.ndarray, float]]) -> np.ndarray | None:
+        """The rim centre in table mm, from where the base marker is now, if it is seen."""
+        if self.rim is None or self.rim[0] not in marks:
+            return None
+        return marks[self.rim[0]][0].mean(axis=0) + self.rim[1]
 
     def gy(self, z: float) -> int:
         """Height mm -> graph pixel row."""
@@ -279,6 +291,10 @@ class Map:
             cv2.fillPoly(img, [np.array([self.px(p) for p in X])], (255, 0, 255))
             x, y = self.px(X.mean(axis=0))
             cv2.putText(img, f"id {mid}", (x + 12, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+        rim = self.rim_centre(marks)
+        if rim is not None:
+            cv2.circle(img, self.px(rim), int(self.rim[2] * self.scale), (0, 140, 255), 2)
+            cv2.drawMarker(img, self.px(rim), (0, 140, 255), cv2.MARKER_CROSS, 10, 2)
         x_of = lambda t: int(self.w - 5 - (now - t) / self.seconds * (self.w - self.side - 50))
         for tr in tracker.tracks:
             for t, p in tr.trail:
@@ -368,12 +384,18 @@ def main() -> None:
 
             lines = [(f"{fps:.0f} fps  detect {got[0][2]:.0f}/{got[1][2]:.0f} ms  camera skew {skew_ms:.0f} ms",
                       (0, 255, 255))]
+            rim = table_map.rim_centre(marks) if table_map is not None else None
             for tr, _ in current:
                 text = (f"hand {tr.number}: X {tr.palm[0]:.0f}  Y {tr.palm[1]:.0f}  height {tr.palm[2]:.0f} mm"
                         f"   lowest point {tr.pts[:, 2].min():.0f} mm   error {tr.err:.1f} px")
                 if args.bowl:
                     text += f"   to bowl {np.linalg.norm(tr.palm - np.array(args.bowl)):.0f} mm"
+                if rim is not None:
+                    text += (f"   to rim centre {np.linalg.norm(tr.palm[:2] - rim[:2]):.0f} mm,"
+                             f" {tr.palm[2] - rim[2]:+.0f} mm above rim")
                 lines.append((text, tr.colour))
+            if rim is not None:
+                lines.append((f"rim: X {rim[0]:.0f}  Y {rim[1]:.0f}  height {rim[2]:.0f} mm", (0, 140, 255)))
             lines += marker_lines(mk0, mk1, marks)
             if not current and (hands0 or hands1):
                 lines.append((f"hand seen by {'both cameras but no match' if hands0 and hands1 else 'one camera only'}",
