@@ -14,7 +14,8 @@ speed curve of the move, so it is known mid-move and when a hand covers the mark
 
 Dodge: when any hand point is within --trigger mm of the rim centre (seen from above) and no
 more than --height mm above the rim, the bowl jumps to whichever end of the rail is furthest
-from the hand (only ever the ends: short steps looked like the bowl following the hand). If it
+from the hand (only ever the ends: short steps looked like the bowl following the hand). The
+slow return to the middle goes in 12 mm hops, so a new hand never waits for it to finish. If it
 is already there, it stays. A new dodge waits until the last move has finished, and until the
 hand has come --hyst mm closer than it has been since (so a hand hovering between the ends does
 not send the bowl back and forth); a hand over the opening always counts.
@@ -49,6 +50,7 @@ from y_speed import y_switch_triggered
 from y_sweep import Marlin
 
 YMIN, YMAX = 5.0, 215.0
+RETURN_HOP = 12.0  # mm per hop when creeping back to rest (about 0.15 s each)
 LAG = 0.08  # s from sending a move to the bed starting (bench-log: measured 0.08 to 0.1 s over)
 
 
@@ -431,8 +433,9 @@ def main() -> int:
                         + (f" then back to Y{pending:.0f}" if kind == "feint" else "")
                         + f"; frame to command {1000 * (time.monotonic() - seen_at):.0f} ms")
             elif not moving and now - last_near > a.rest_after and abs(y - a.rest) > 2 and not state["banner"]:
-                axis.move(a.rest, 100, 1000)
-                state["text"] = "back to rest"
+                # Creep back in short hops, so a hand arriving mid-way waits at most one hop.
+                axis.move(y + float(np.clip(a.rest - y, -RETURN_HOP, RETURN_HOP)), 150, 2000)
+                state["text"] = "creeping back to the middle"
             elif not moving and not reaching:
                 state["text"] = "watching" if state["enabled"] else "dodging off"
             if hold:
