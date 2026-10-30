@@ -26,10 +26,10 @@ BOARD = (8, 5)
 SQUARE_MM = 30.0
 
 # Bowl marker: one ArUco 4x4 marker (6 cells wide with its black border) on the moving bed.
-# 60 mm gives 10 mm cells, about 5 px each from 1.1 m up. Measure the print, pass --marker.
+# 50 mm gives 8.3 mm cells, about 4.5 px each from 1.1 m up. Measure the print, pass --marker.
 MARKER_DICT = cv2.aruco.DICT_4X4_50
 MARKER_ID = 0
-MARKER_MM = 60.0
+MARKER_MM = 50.0
 
 
 def board_points(square_mm: float) -> np.ndarray:

@@ -3,7 +3,7 @@
     uv run python scripts/make_marker.py         # writes calib/marker.pdf
 
 Print at 100% or "actual size" (not "fit to page"), then measure the black square edge to edge.
-If it is not 60 mm, note the measured size. Cut along the grey line: the white band round the
+If it is not 50 mm, note the measured size. Cut along the grey line: the white band round the
 black square must stay, the detector needs it. Glue it flat on the bed, face up.
 """
 
@@ -14,7 +14,7 @@ import cv2
 from make_board import PT, write_pdf
 from stereo import MARKER_DICT, MARKER_ID, MARKER_MM
 
-MARGIN_MM = 10.0  # white band kept round the black square
+MARGIN_MM = 5.0  # white band kept round the black square; the cut piece is 60 mm
 
 
 def main() -> None:
