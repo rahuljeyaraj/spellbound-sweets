@@ -13,6 +13,8 @@ read them off the screen.
 The window shows both cameras with the hand drawn on (green when matched in both, red when
 only one camera has it), and below them a live map: a top view of the table with the board,
 the cameras, the hand and its trail, and a graph of hand height over the last few seconds.
+Bed markers are outlined too (magenta when both cameras see one, with its 3D position listed;
+red when only one does), and drawn on the map with the Y rail from bowl_calibrate.py.
 
 Two hands in view: each hand in camera 0 is matched to the hand in camera 1 whose points
 triangulate with the smallest reprojection error. A large error on every hand usually means
@@ -33,6 +35,7 @@ import numpy as np
 from mediapipe.tasks.python import BaseOptions
 from mediapipe.tasks.python import vision
 
+from bowl_calibrate import BOWL_FILE, draw_markers, find_markers, make_detector, marker_lines, match_markers
 from stereo import (
     BOARD, CALIB_FILE, HEIGHT, ROOT, SQUARE_MM, WIDTH, Calibration, Camera, open_cameras, wait_for_frames,
 )
@@ -56,7 +59,8 @@ def ensure_model() -> None:
 
 
 class Detector:
-    """Runs the hand landmarker on one camera's newest frames in a thread of its own."""
+    """Runs the hand landmarker and the marker finder on one camera's newest frames in a thread
+    of its own."""
 
     def __init__(self, cam: Camera, max_hands: int) -> None:
         self.cam = cam
@@ -69,8 +73,9 @@ class Detector:
             min_tracking_confidence=0.5,
         )
         self.landmarker = vision.HandLandmarker.create_from_options(opts)
+        self.marker_det = make_detector()
         self.lock = threading.Lock()
-        self.result: tuple[np.ndarray, float, list[np.ndarray]] | None = None
+        self.result: tuple[np.ndarray, float, list[np.ndarray], dict[int, np.ndarray]] | None = None
         self.seq = 0
         self.ms = 0.0
         self.running = True
@@ -90,12 +95,13 @@ class Detector:
             image = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             res = self.landmarker.detect_for_video(image, ts)
             hands = [np.array([(p.x * WIDTH, p.y * HEIGHT) for p in h]) for h in res.hand_landmarks]
+            markers = find_markers(self.marker_det, frame)
             with self.lock:
-                self.result = (frame, stamp, hands)
+                self.result = (frame, stamp, hands, markers)
                 self.seq += 1
                 self.ms = (time.perf_counter() - t0) * 1000
 
-    def latest(self) -> tuple[tuple[np.ndarray, float, list[np.ndarray]] | None, int, float]:
+    def latest(self) -> tuple[tuple[np.ndarray, float, list[np.ndarray], dict[int, np.ndarray]] | None, int, float]:
         with self.lock:
             return self.result, self.seq, self.ms
 
@@ -202,6 +208,11 @@ class Map:
         self.bowl = np.array(bowl) if bowl else None
         self.seconds, self.max_z = seconds, max_z
         self.cams = [cal.to_table(np.zeros((1, 3)))[0], cal.to_table((-cal.R.T @ cal.T).reshape(1, 3))[0]]
+        # The Y axis from bowl_calibrate.py: where the marker centre runs from Y0 to Y220.
+        self.rail = None
+        if BOWL_FILE.exists():
+            b = np.load(BOWL_FILE)
+            self.rail = cal.to_table(np.array([b["home"] + y * b["step"] for y in (0.0, 220.0)]))
         self.background = self._background()
 
     def px(self, xy: np.ndarray) -> tuple[int, int]:
@@ -232,6 +243,11 @@ class Map:
                         (255, 200, 0), 1)
         if self.bowl is not None:
             cv2.circle(img, self.px(self.bowl), int(60 * self.scale), (200, 0, 200), 2)
+        if self.rail is not None:
+            cv2.line(img, self.px(self.rail[0]), self.px(self.rail[1]), (120, 0, 120), 3)
+            cv2.circle(img, self.px(self.rail[0]), 5, (120, 0, 120), -1)
+            cv2.putText(img, "Y0", (self.px(self.rail[0])[0] - 30, self.px(self.rail[0])[1] + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 0, 160), 1)
         cv2.putText(img, "top view, grid 100 mm", (8, self.h - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
         cv2.line(img, (self.side, 0), (self.side, self.h), (90, 90, 90), 1)
         for z in range(0, int(self.max_z) + 1, 100):
@@ -256,8 +272,13 @@ class Map:
             while tr.history and now - tr.history[0][0] > self.seconds:
                 tr.history.popleft()
 
-    def draw(self, now: float, tracker: Tracker, seen: set[int]) -> np.ndarray:
+    def draw(self, now: float, tracker: Tracker, seen: set[int],
+             marks: dict[int, tuple[np.ndarray, float]]) -> np.ndarray:
         img = self.background.copy()
+        for mid, (X, _) in marks.items():
+            cv2.fillPoly(img, [np.array([self.px(p) for p in X])], (255, 0, 255))
+            x, y = self.px(X.mean(axis=0))
+            cv2.putText(img, f"id {mid}", (x + 12, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
         x_of = lambda t: int(self.w - 5 - (now - t) / self.seconds * (self.w - self.side - 50))
         for tr in tracker.tracks:
             for t, p in tr.trail:
@@ -318,19 +339,22 @@ def main() -> None:
                     break
                 continue
             last_seq = [g[1] for g in got]
-            (f0, s0, hands0), (f1, s1, hands1) = got[0][0], got[1][0]
+            (f0, s0, hands0, mk0), (f1, s1, hands1, mk1) = got[0][0], got[1][0]
             skew_ms = abs(s0 - s1) * 1000
 
             now = time.monotonic()
             found = match_hands(cal, hands0, hands1, args.max_err)
             current = tracker.update(now, found)
             seen = {tr.number for tr, _ in current}
+            marks = match_markers(cal, mk0, mk1)
 
             frames_done += 1
             if now - fps_t0 >= 1.0:
                 fps, frames_done, fps_t0 = frames_done / (now - fps_t0), 0, now
 
             v0, v1 = f0.copy(), f1.copy()
+            draw_markers(v0, mk0, marks)
+            draw_markers(v1, mk1, marks)
             for h in hands0:
                 draw_hand(v0, h, (0, 0, 255))
             for h in hands1:
@@ -350,6 +374,7 @@ def main() -> None:
                 if args.bowl:
                     text += f"   to bowl {np.linalg.norm(tr.palm - np.array(args.bowl)):.0f} mm"
                 lines.append((text, tr.colour))
+            lines += marker_lines(mk0, mk1, marks)
             if not current and (hands0 or hands1):
                 lines.append((f"hand seen by {'both cameras but no match' if hands0 and hands1 else 'one camera only'}",
                               (0, 0, 255)))
@@ -357,7 +382,7 @@ def main() -> None:
                 cv2.putText(view, text, (10, 25 + 25 * k), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2)
             if table_map is not None:
                 table_map.update(now, tracker, seen)
-                view = np.vstack([view, table_map.draw(now, tracker, seen)])
+                view = np.vstack([view, table_map.draw(now, tracker, seen, marks)])
             cv2.imshow("hand 3d", view)
 
             if current and now - last_print > 0.2:

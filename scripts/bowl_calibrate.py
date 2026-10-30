@@ -16,7 +16,10 @@ are triangulated, using the median over several frames. From the marker centres 
 
 and checks itself: the marker must move as far as the G-code said, the stops must lie on one
 straight line, and the marker's printed size must come out right. If those are off, a camera
-has been bumped. The result goes to calib/bowl.npz, and a picture of each stop to calib/bowl/.
+has been bumped. The result goes to calib/bowl.npz.
+
+A live window shows both cameras the whole time, with each marker outlined and its 3D
+position, and the results at the end. Press q to stop (mid-run it quick-stops the bed).
 """
 
 from __future__ import annotations
@@ -50,7 +53,77 @@ def find_markers(det: cv2.aruco.ArucoDetector, frame: np.ndarray) -> dict[int, n
     return {int(i): c.reshape(4, 2) for i, c in zip(ids.ravel(), corners) if int(i) in MARKERS_MM}
 
 
-def measure(cal: Calibration, cams, det, frames: int) -> tuple[dict[int, np.ndarray], list[np.ndarray], dict[int, float]]:
+def match_markers(cal: Calibration, m0: dict[int, np.ndarray], m1: dict[int, np.ndarray]
+                  ) -> dict[int, tuple[np.ndarray, float]]:
+    """Markers seen by both cameras: id -> (4 corners in table mm, error px)."""
+    out = {}
+    for mid in sorted(m0.keys() & m1.keys()):
+        X = cal.triangulate(m0[mid], m1[mid])
+        out[mid] = (cal.to_table(X), cal.reprojection_error(X, m0[mid], m1[mid]))
+    return out
+
+
+def draw_markers(img: np.ndarray, markers: dict[int, np.ndarray], both: dict[int, tuple[np.ndarray, float]]) -> None:
+    """Outline each marker: magenta when both cameras see it (with its height), red for one only."""
+    for mid, c in markers.items():
+        colour = (255, 0, 255) if mid in both else (0, 0, 255)
+        cv2.polylines(img, [c.astype(np.int32)], True, colour, 3)
+        label = f"id {mid}" + (f"  h {both[mid][0][:, 2].mean():.0f}" if mid in both else "")
+        cv2.putText(img, label, tuple(int(v) for v in c[0] + [0, -10]), cv2.FONT_HERSHEY_SIMPLEX, 0.9, colour, 2)
+
+
+def marker_lines(m0: dict[int, np.ndarray], m1: dict[int, np.ndarray],
+                 both: dict[int, tuple[np.ndarray, float]]) -> list[tuple[str, tuple[int, int, int]]]:
+    """One line of text per marker: its 3D position, or which camera alone sees it."""
+    lines = []
+    for mid, (X, err) in both.items():
+        c = X.mean(axis=0)
+        side = np.linalg.norm(np.roll(X, -1, axis=0) - X, axis=1).mean()
+        lines.append((f"marker {mid}: X {c[0]:.0f}  Y {c[1]:.0f}  height {c[2]:.0f} mm"
+                      f"   size {side:.1f} mm   error {err:.1f} px", (255, 0, 255)))
+    for mid in sorted((m0.keys() | m1.keys()) - both.keys()):
+        lines.append((f"marker {mid}: seen by camera {0 if mid in m0 else 1} only", (0, 0, 255)))
+    return lines
+
+
+class Viewer:
+    """Live window of both cameras with the markers outlined, their 3D positions, and progress."""
+
+    def __init__(self, cal: Calibration, cams, det) -> None:
+        self.cal, self.cams, self.det = cal, cams, det
+        self.status = ""
+        self.log: list[str] = []
+        self.last = 0.0
+
+    def show(self, shots: list[np.ndarray] | None = None, found: list[dict[int, np.ndarray]] | None = None) -> None:
+        if shots is None:
+            if time.monotonic() - self.last < 0.05:
+                return
+            shots = [c.latest()[0] for c in self.cams]
+        if found is None:
+            found = [find_markers(self.det, s) for s in shots]
+        self.last = time.monotonic()
+        both = match_markers(self.cal, found[0], found[1])
+        views = [s.copy() for s in shots]
+        for v, f in zip(views, found):
+            draw_markers(v, f, both)
+        view = np.hstack([cv2.resize(v, (WIDTH // 2, HEIGHT // 2)) for v in views])
+        lines = [(self.status, (0, 255, 255))] + marker_lines(found[0], found[1], both)
+        lines += [(text, (255, 255, 255)) for text in self.log[-8:]]
+        for k, (text, colour) in enumerate(lines):
+            cv2.putText(view, text, (10, 25 + 25 * k), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4)
+            cv2.putText(view, text, (10, 25 + 25 * k), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2)
+        cv2.imshow("bowl calibrate", view)
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            raise KeyboardInterrupt
+
+    def say(self, text: str) -> None:
+        print(text)
+        self.log.append(text)
+
+
+def measure(cal: Calibration, cams, det, frames: int, viewer: Viewer
+            ) -> tuple[dict[int, np.ndarray], list[np.ndarray], dict[int, float]]:
     """Triangulate each marker's corners over several new frame pairs. Returns the median
     corners in camera 0 mm per id, the last frame of each camera, and the median error px."""
     per_id: dict[int, list[np.ndarray]] = {}
@@ -68,6 +141,7 @@ def measure(cal: Calibration, cams, det, frames: int) -> tuple[dict[int, np.ndar
         shots = [n[0] for n in now]
         got += 1
         m0, m1 = find_markers(det, shots[0]), find_markers(det, shots[1])
+        viewer.show(shots, [m0, m1])
         for mid in m0.keys() & m1.keys():
             X = cal.triangulate(m0[mid], m1[mid])
             per_id.setdefault(mid, []).append(X)
@@ -75,19 +149,6 @@ def measure(cal: Calibration, cams, det, frames: int) -> tuple[dict[int, np.ndar
     # Need the marker in at least half the frames to trust it.
     out = {mid: np.median(np.array(xs), axis=0) for mid, xs in per_id.items() if len(xs) >= frames / 2}
     return out, shots, {mid: float(np.median(errs[mid])) for mid in out}
-
-
-def save_picture(shots: list[np.ndarray], det, name: str) -> None:
-    views = []
-    for shot in shots:
-        v = shot.copy()
-        for mid, c in find_markers(det, shot).items():
-            cv2.polylines(v, [c.astype(np.int32)], True, (0, 255, 0), 2)
-            cv2.putText(v, f"id {mid}", tuple(int(x) for x in c[0] + [0, -8]), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                        (0, 255, 0), 2)
-        views.append(cv2.resize(v, (WIDTH // 2, HEIGHT // 2)))
-    (CALIB_DIR / "bowl").mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(CALIB_DIR / "bowl" / name), np.hstack(views))
 
 
 def fit_axis(ys: np.ndarray, centres: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -125,85 +186,106 @@ def main() -> int:
     if cal.size != (WIDTH, HEIGHT):
         raise SystemExit(f"{CALIB_FILE} was made at {cal.size}, cameras run at {(WIDTH, HEIGHT)}")
     det = make_detector()
-    cam1_pos = -cal.R.T @ cal.T.ravel()
-    between_cams = cam1_pos / 2  # "toward the cameras" for the face normal
 
     m = Marlin(a.port)
     cams = []
     found: dict[int, list[tuple[float, np.ndarray, float]]] = {}
+    ok = False
     try:
         cams = open_cameras(a.cams, a.exposure)
         wait_for_frames(cams)
-        time.sleep(1.0)  # let auto exposure settle
+        v = Viewer(cal, cams, det)
+        v.status = "starting cameras"
+        hold(v, 1.0)  # let auto exposure settle
         m.send("G21")
         m.send("G90")
         m.send("M204 P500 T500")
-        print("homing Y")
-        m.send("G28 Y", timeout=60)
+        v.status = "homing Y"
+        m.send("G28 Y", timeout=60, idle=v.show)
         m.send(f"G0 Y20 F{FEED}")
-        m.send("M400", timeout=60)
+        m.send("M400", timeout=60, idle=v.show)
         if y_switch_triggered(m):
             raise RuntimeError("the Y switch reads pressed at Y20, so the home was not real; check the switch")
         for y in a.stops:
+            v.status = f"moving to Y{y:g}"
             m.send(f"G0 Y{y:g} F{FEED}")
-            m.send("M400", timeout=60)
-            time.sleep(a.settle)
-            corners, shots, errs = measure(cal, cams, det, a.frames)
-            save_picture(shots, det, f"y{y:g}.jpg")
+            m.send("M400", timeout=60, idle=v.show)
+            hold(v, a.settle)
+            v.status = f"measuring at Y{y:g}"
+            corners, shots, errs = measure(cal, cams, det, a.frames, v)
             seen = ", ".join(f"id {mid} ({errs[mid]:.2f} px)" for mid in sorted(corners)) or "no marker"
-            print(f"Y{y:g}: {seen}")
+            v.say(f"Y{y:g}: {seen}")
             for mid, X in corners.items():
                 found.setdefault(mid, []).append((y, X, errs[mid]))
+        v.status = "back to Y5"
         m.send(f"G0 Y5 F{FEED}")
-        m.send("M400", timeout=60)
+        m.send("M400", timeout=60, idle=v.show)
+
+        ok = report(v, cal, found, sizes, len(a.stops))
+        v.status = "done: press q to close"
+        while True:  # keep the window live until q
+            v.show()
+            time.sleep(0.02)
     except KeyboardInterrupt:
         m.ser.write(b"M410\n")
-        print("stopped")
-        return 1
+        print("closed")
     finally:
         for c in cams:
             c.close()
         m.close()
+        cv2.destroyAllWindows()
+    return 0 if found and ok else 1
 
+
+def hold(v: Viewer, seconds: float) -> None:
+    """Wait while keeping the window live."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        v.show()
+        time.sleep(0.01)
+
+
+def report(v: Viewer, cal: Calibration, found: dict[int, list[tuple[float, np.ndarray, float]]],
+           sizes: dict[int, float], stops: int) -> bool:
+    """Fit and check the axis for each marker seen, save the best, and say how it went."""
     if not found:
-        print("no marker seen at any stop: look at the pictures in calib/bowl/")
-        return 1
-    # Use the marker seen at the most stops (both, if both are on the bed, are reported).
+        v.say("no marker seen at any stop")
+        return False
+    between_cams = -cal.R.T @ cal.T.ravel() / 2  # "toward the cameras" for the face normal
     results = {}
     for mid, rows in sorted(found.items()):
         ys = np.array([r[0] for r in rows])
         Xs = np.array([r[1] for r in rows])
         centres = Xs.mean(axis=1)
         side = float(np.mean([np.linalg.norm(np.roll(X, -1, axis=0) - X, axis=1).mean() for X in Xs]))
-        print(f"\nmarker id {mid}: seen at {len(rows)} of {len(a.stops)} stops")
-        print(f"  size: measured {side:.1f} mm, printed {sizes[mid]:g} mm ({100 * (side / sizes[mid] - 1):+.1f}%)")
+        v.say(f"marker {mid}: seen at {len(rows)} of {stops} stops, size {side:.1f} mm "
+              f"(printed {sizes[mid]:g}, {100 * (side / sizes[mid] - 1):+.1f}%)")
         if len(rows) < 3:
-            print("  fewer than 3 stops: cannot fit and check the axis")
+            v.say("  fewer than 3 stops: cannot fit and check the axis")
             continue
         home, step, off = fit_axis(ys, centres)
         scale = float(np.linalg.norm(step))
         up = face_normal(Xs.mean(axis=0), between_cams)
-        print(f"  travel: {scale:.3f} mm per commanded mm ({100 * (scale - 1):+.1f}%)")
-        print(f"  straight line: worst stop {off.max():.1f} mm off, average {off.mean():.1f} mm")
         tilt = float(np.degrees(np.arcsin(abs(np.dot(step / scale, up)))))
-        print(f"  rail vs bed face: {tilt:.1f} degrees out of flat")
+        v.say(f"  travel {100 * (scale - 1):+.1f}%, off the line {off.max():.1f} mm worst, "
+              f"rail vs bed face {tilt:.1f} deg")
         if cal.table_R is not None:
             h = cal.to_table(home.reshape(1, 3))[0]
             d = (step / scale) @ cal.table_R
-            print(f"  home in table mm: X {h[0]:.0f}  Y {h[1]:.0f}  height {h[2]:.0f}")
-            print(f"  rail direction in table axes: X {d[0]:+.3f}  Y {d[1]:+.3f}  Z {d[2]:+.3f}")
+            v.say(f"  Y0 at table X {h[0]:.0f}  Y {h[1]:.0f}  height {h[2]:.0f} mm; "
+                  f"rail along X {d[0]:+.3f}  Y {d[1]:+.3f}  Z {d[2]:+.3f}")
         ok = abs(scale - 1) < 0.02 and off.max() < 3 and abs(side / sizes[mid] - 1) < 0.03
-        print("  check: " + ("GOOD" if ok else "OFF: a camera may have moved, or the marker is not flat"))
+        v.say("  check: " + ("GOOD" if ok else "OFF: a camera may have moved, or the marker is not flat"))
         results[mid] = dict(home=home, step=step, up=up, ys=ys, centres=centres, corners=Xs,
                             side=side, ok=ok, n=len(rows))
     if not results:
-        return 1
+        return False
     best = max(results, key=lambda mid: (results[mid]["n"], -abs(results[mid]["side"] / sizes[mid] - 1)))
     r = results[best]
     np.savez(BOWL_FILE, marker_id=best, home=r["home"], step=r["step"], up=r["up"], ys=r["ys"],
              centres=r["centres"], corners=r["corners"], stamp=time.time())
-    print(f"\nsaved marker id {best} to {BOWL_FILE}")
-    return 0 if r["ok"] else 1
+    v.say(f"saved marker {best} to calib/bowl.npz")
+    return r["ok"]
 
 
 if __name__ == "__main__":

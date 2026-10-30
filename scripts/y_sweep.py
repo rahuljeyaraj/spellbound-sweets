@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from typing import Callable
 
 import serial
 from serial.tools import list_ports
@@ -36,12 +37,15 @@ class Marlin:
                 print("no answer yet, retrying")
         raise TimeoutError("the board did not answer")
 
-    def send(self, cmd: str, timeout: float = 30.0) -> list[str]:
-        """Send one line and return what the board printed before its ok."""
+    def send(self, cmd: str, timeout: float = 30.0, idle: Callable[[], None] | None = None) -> list[str]:
+        """Send one line and return what the board printed before its ok. idle, if given, is
+        called about ten times a second while waiting (e.g. to keep a window live)."""
         self.ser.write((cmd + "\n").encode("ascii"))
         lines: list[str] = []
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            if idle:
+                idle()
             raw = self.ser.readline()
             if not raw:
                 continue
