@@ -13,9 +13,9 @@ above the rim. Where the bowl is comes from the axis, not the camera: the Y we s
 speed curve of the move, so it is known mid-move and when a hand covers the marker.
 
 Dodge: when any hand point is within --trigger mm of the rim centre (seen from above) and no
-more than --height mm above the rim, the bowl jumps along the rail to the side away from the
-hand, far enough that the rim edge is --clear mm from the hand, or to the end of the rail.
-A new dodge waits until the last move has finished. After --rest-after seconds with no hand
+more than --height mm above the rim, the bowl jumps to whichever end of the rail is furthest
+from the hand (only ever the ends: short steps looked like the bowl following the hand). If it
+is already there, it stays. A new dodge waits until the last move has finished. After --rest-after seconds with no hand
 near, the bowl drifts back to the middle slowly.
 
 Lost steps: whenever the bowl is still, the base marker's position is compared with the axis.
@@ -128,14 +128,12 @@ class Axis:
         return now < self.t0 + self.dur
 
 
-def dodge_target(y: float, hand_along: float, need: float) -> float:
-    """Where to send the bowl: on the far side of the hand along the rail, at least `need` mm
-    between rim centre and hand, or as far as the rail goes. hand_along is from the rim centre."""
+def dodge_target(y: float, hand_along: float) -> float:
+    """Where to send the bowl: the end of the rail furthest from the hand. Always an end, never
+    a short step, so it jumps away instead of seeming to follow the hand. hand_along is from the
+    rim centre, in mm along the rail."""
     hand_y = y + hand_along
-    if abs(hand_along) < 10:  # hand right over the middle: go where there is more room
-        return YMIN if hand_y - YMIN > YMAX - hand_y else YMAX
-    target = hand_y - need if hand_along > 0 else hand_y + need
-    return min(max(target, YMIN), YMAX)
+    return YMIN if hand_y - YMIN > YMAX - hand_y else YMAX
 
 
 def home(m: Marlin, show) -> None:
@@ -156,7 +154,6 @@ def main() -> int:
     ap.add_argument("--accel", type=float, default=3000, help="dodge acceleration, mm/s^2")
     ap.add_argument("--trigger", type=float, default=150, help="dodge when a hand point is this close, mm")
     ap.add_argument("--height", type=float, default=250, help="...and at most this high above the rim, mm")
-    ap.add_argument("--clear", type=float, default=60, help="gap left between rim edge and hand, mm")
     ap.add_argument("--rest", type=float, default=110, help="where the bowl waits, Y mm")
     ap.add_argument("--rest-after", type=float, default=3.0, help="seconds with no hand near before going back")
     ap.add_argument("--slip", type=float, default=6.0, help="marker vs axis difference that means lost steps, mm")
@@ -321,7 +318,7 @@ def main() -> int:
 
             if close and not moving and state["enabled"] and not state["banner"]:
                 tr, rp = min(close, key=lambda c: np.hypot(c[1][0], c[1][1]))
-                target = dodge_target(y, rp[0], rail.radius + a.clear)  # rim edge clear of the hand
+                target = dodge_target(y, rp[0])
                 if abs(target - y) > 5:
                     seen_at = max(s0, s1)  # when the newer of the two frames was taken
                     axis.move(target, a.speed, a.accel)
