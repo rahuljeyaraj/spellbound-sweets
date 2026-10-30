@@ -14,8 +14,9 @@ speed curve of the move, so it is known mid-move and when a hand covers the mark
 
 Dodge: when any hand point is within --trigger mm of the rim centre (seen from above) and no
 more than --height mm above the rim, the bowl jumps to whichever end of the rail is furthest
-from the hand (only ever the ends: short steps looked like the bowl following the hand). The
-slow return to the middle goes in 12 mm hops, so a new hand never waits for it to finish. If it
+from the hand (only ever the ends: short steps looked like the bowl following the hand). It
+stays there afterwards; there is no drifting back to the middle (it delayed dodges, and in
+short hops looked jittery). If it
 is already there, it stays. A new dodge waits until the last move has finished, and until the
 hand has come --hyst mm closer than it has been since (so a hand hovering between the ends does
 not send the bowl back and forth); a hand over the opening always counts.
@@ -23,9 +24,7 @@ not send the bowl back and forth); a hand over the opening always counts.
 Feints: a random --feint share of dodges go only 40 to 80% of the way, then dart back to 0 to
 40 mm from where the bowl started, so a hand that has learned to follow it is caught out. The
 return is skipped if a hand below the rim is in its way. Hand points below the rim never trigger a dodge, and if one
-is in the bowl or in its path, the bowl stays put: moving into a hand made it lose steps. After --rest-after seconds with no hand
-near, the bowl drifts back to the middle slowly.
-
+is in the bowl or in its path, the bowl stays put: moving into a hand made it lose steps.
 Lost steps: whenever the bowl is still, the base marker's position is compared with the axis.
 If they differ by more than --slip mm, it re-homes by itself (about 3 s) and goes on. (Not
 G92: Marlin shifts its soft limits with it, so a stall point became a wall.) 800 mm/s at 8000 mm/s2 with the bowl lost steps on long moves
@@ -50,7 +49,6 @@ from y_speed import y_switch_triggered
 from y_sweep import Marlin
 
 YMIN, YMAX = 5.0, 215.0
-RETURN_HOP = 12.0  # mm per hop when creeping back to rest (about 0.15 s each)
 LAG = 0.08  # s from sending a move to the bed starting (bench-log: measured 0.08 to 0.1 s over)
 
 
@@ -185,7 +183,6 @@ def main() -> int:
     ap.add_argument("--feint", type=float, default=0.3, help="share of dodges that are feints, 0 to 1")
     ap.add_argument("--hyst", type=float, default=50, help="after a move, the hand must come this much closer, mm")
     ap.add_argument("--rest", type=float, default=110, help="where the bowl waits, Y mm")
-    ap.add_argument("--rest-after", type=float, default=3.0, help="seconds with no hand near before going back")
     ap.add_argument("--slip", type=float, default=6.0, help="marker vs axis difference that means lost steps, mm")
     ap.add_argument("--max-err", type=float, default=20.0, help="reject hand pairs above this px error")
     ap.add_argument("--spread", action="store_true", help="Y driver in spreadCycle: louder, more torque at speed")
@@ -215,7 +212,6 @@ def main() -> int:
         axis = Axis(m, a.rest)
         state = {"text": "starting", "banner": None, "enabled": True, "log": []}
         last_seq = [0, 0]
-        last_near = time.monotonic()
         still_since = time.monotonic()
         dry_placed = False
         slips = 0
@@ -351,8 +347,6 @@ def main() -> int:
             # Every hand point in rail coordinates around the rim centre: along, across, above the rim.
             hand_rps = [(tr, rail.to_rail(pts, y)) for tr, (pts, _, _, _) in current]
             near_pts = [(tr, rp[np.argmin(np.hypot(rp[:, 0], rp[:, 1]))]) for tr, rp in hand_rps]
-            if near_pts and min(np.hypot(rp[0], rp[1]) for _, rp in near_pts) < a.trigger + 150:
-                last_near = now
             # Only points above the rim count as reaching. Below it a hand is beside or in the bowl,
             # and moving would hit it (that is what made it lose steps).
             reach = [p for _, rp in hand_rps for p in rp if 0 <= p[2] < a.height]
@@ -432,10 +426,6 @@ def main() -> int:
                     say(f"{kind}: hand {dist:.0f} mm away, {p[2]:+.0f} mm above rim; Y{y:.0f} to Y{target:.0f}"
                         + (f" then back to Y{pending:.0f}" if kind == "feint" else "")
                         + f"; frame to command {1000 * (time.monotonic() - seen_at):.0f} ms")
-            elif not moving and now - last_near > a.rest_after and abs(y - a.rest) > 2 and not state["banner"]:
-                # Creep back in short hops, so a hand arriving mid-way waits at most one hop.
-                axis.move(y + float(np.clip(a.rest - y, -RETURN_HOP, RETURN_HOP)), 150, 2000)
-                state["text"] = "creeping back to the middle"
             elif not moving and not reaching:
                 state["text"] = "watching" if state["enabled"] else "dodging off"
             if hold:
