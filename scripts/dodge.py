@@ -19,7 +19,10 @@ A new dodge waits until the last move has finished. After --rest-after seconds w
 near, the bowl drifts back to the middle slowly.
 
 Lost steps: whenever the bowl is still, the base marker's position is compared with the axis.
-If they differ by more than --slip mm, dodging stops (red banner) until h re-homes.
+If they differ by more than --slip mm, the board is told the bed's real position (G92, no
+move) and dodging goes on. Only if the marker says the bed is off the rail does dodging stop
+(red banner) until h re-homes. 800 mm/s at 8000 mm/s2 with the bowl lost steps on long moves
+(2026-10-30); 700 at 7000 was the last clean bench speed with weight on.
 
 Keys: q quit, h re-home, d dodging on or off.
 """
@@ -158,6 +161,7 @@ def main() -> int:
     ap.add_argument("--rest-after", type=float, default=3.0, help="seconds with no hand near before going back")
     ap.add_argument("--slip", type=float, default=6.0, help="marker vs axis difference that means lost steps, mm")
     ap.add_argument("--max-err", type=float, default=20.0, help="reject hand pairs above this px error")
+    ap.add_argument("--spread", action="store_true", help="Y driver in spreadCycle: louder, more torque at speed")
     a = ap.parse_args()
 
     cal = Calibration.load()
@@ -185,6 +189,7 @@ def main() -> int:
         last_near = time.monotonic()
         still_since = time.monotonic()
         dry_placed = False
+        slips = 0
 
         def say(text: str) -> None:
             print(text)
@@ -250,7 +255,7 @@ def main() -> int:
         if m:
             m.send("G21")
             m.send("G90")
-            m.send("M569 S1 Y")  # stealthChop, as in the bench tests
+            m.send(f"M569 S{0 if a.spread else 1} Y")  # stealthChop (quiet) unless --spread
             m.send(f"M203 Y{a.speed:g}")
             m.send(f"M201 Y{a.accel:g}")
             state["text"] = "homing Y"
@@ -302,10 +307,17 @@ def main() -> int:
             if moving:
                 still_since = now
             elif m and now - still_since > 0.3 and rail.base_id in marks and not state["banner"]:
-                gap = rail.marker_y(marks[rail.base_id][0].mean(axis=0)) - y
-                if abs(gap) > a.slip:
-                    state["banner"] = f"marker and axis differ by {gap:+.0f} mm: lost steps? press h to re-home"
-                    say(state["banner"])
+                seen_y = rail.marker_y(marks[rail.base_id][0].mean(axis=0))
+                if abs(seen_y - y) > a.slip:
+                    # Lost steps: tell the board where the bed really is, from the marker. No move.
+                    if YMIN - 10 < seen_y < YMAX + 10:
+                        m.send(f"G92 Y{seen_y:.1f}")
+                        axis = Axis(m, seen_y)
+                        slips += 1
+                        say(f"lost steps: axis said Y{y:.0f}, marker says Y{seen_y:.0f}; corrected ({slips} so far)")
+                    else:
+                        state["banner"] = f"marker says Y{seen_y:.0f}, off the rail: press h to re-home"
+                        say(state["banner"])
 
             if close and not moving and state["enabled"] and not state["banner"]:
                 tr, rp = min(close, key=lambda c: np.hypot(c[1][0], c[1][1]))
