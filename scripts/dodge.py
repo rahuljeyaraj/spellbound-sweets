@@ -17,7 +17,11 @@ more than --height mm above the rim, the bowl jumps to whichever end of the rail
 from the hand (only ever the ends: short steps looked like the bowl following the hand). If it
 is already there, it stays. A new dodge waits until the last move has finished, and until the
 hand has come --hyst mm closer than it has been since (so a hand hovering between the ends does
-not send the bowl back and forth); a hand over the opening always counts. Hand points below the rim never trigger a dodge, and if one
+not send the bowl back and forth); a hand over the opening always counts.
+
+Feints: a random --feint share of dodges go only 40 to 80% of the way, then dart back to 0 to
+40 mm from where the bowl started, so a hand that has learned to follow it is caught out. The
+return is skipped if a hand below the rim is in its way. Hand points below the rim never trigger a dodge, and if one
 is in the bowl or in its path, the bowl stays put: moving into a hand made it lose steps. After --rest-after seconds with no hand
 near, the bowl drifts back to the middle slowly.
 
@@ -176,6 +180,7 @@ def main() -> int:
     ap.add_argument("--accel", type=float, default=7000, help="dodge acceleration, mm/s^2")
     ap.add_argument("--trigger", type=float, default=250, help="dodge when a hand point is this close, mm")
     ap.add_argument("--height", type=float, default=250, help="...and at most this high above the rim, mm")
+    ap.add_argument("--feint", type=float, default=0.3, help="share of dodges that are feints, 0 to 1")
     ap.add_argument("--hyst", type=float, default=50, help="after a move, the hand must come this much closer, mm")
     ap.add_argument("--rest", type=float, default=110, help="where the bowl waits, Y mm")
     ap.add_argument("--rest-after", type=float, default=3.0, help="seconds with no hand near before going back")
@@ -212,6 +217,8 @@ def main() -> int:
         slips = 0
         ref = a.trigger + a.hyst
         last_hold = None
+        pending: float | None = None  # where a feint goes back to once its first move ends
+        rng = np.random.default_rng()
 
         def say(text: str) -> None:
             print(text)
@@ -325,6 +332,7 @@ def main() -> int:
                 home(m, idle_show)
                 anchor(20.0)
                 axis = Axis(m, 20.0)
+                pending = None
                 axis.move(a.rest, 100, 1000)
                 state["banner"] = None
                 say("re-homed")
@@ -367,6 +375,7 @@ def main() -> int:
                     home(m, idle_show)
                     anchor(20.0)
                     axis = Axis(m, 20.0)
+                    pending = None
                     axis.move(a.rest, 100, 1000)
                     state["text"] = "watching"
 
@@ -390,7 +399,16 @@ def main() -> int:
                 elif path_blocked(low, 0.0, rail.radius):
                     hold = "holding: hand below the rim at the bowl"
 
-            if reaching and not moving and state["enabled"] and not state["banner"]:
+            if pending is not None and not moving:
+                # Second half of a feint: dart back, unless a low hand is now in the way.
+                if path_blocked(low, (pending - y) * rail.scale, rail.radius) or state["banner"]:
+                    say("feint: return cancelled, hand in the way")
+                else:
+                    axis.move(pending, a.speed, a.accel)
+                    state["text"] = f"FEINT back to Y{pending:.0f}"
+                    moving = True
+                pending = None
+            elif reaching and not moving and state["enabled"] and not state["banner"]:
                 p = min(reach, key=lambda q: np.hypot(q[0], q[1]))
                 target = dodge_target(y, p[0])
                 if abs(target - y) <= 5:
@@ -399,10 +417,18 @@ def main() -> int:
                     hold = "holding: hand below the rim in the bowl's path"
                 else:
                     seen_at = max(s0, s1)  # when the newer of the two frames was taken
+                    kind = "dodge"
+                    if rng.random() < a.feint:
+                        # Feint: only part of the way, then back near where it started.
+                        back = min(max(y + np.sign(y - target) * rng.uniform(0, 40), YMIN), YMAX)
+                        target = y + (target - y) * rng.uniform(0.4, 0.8)
+                        pending = back
+                        kind = "feint"
                     axis.move(target, a.speed, a.accel)
-                    state["text"] = f"DODGE to Y{target:.0f}"
-                    say(f"dodge: hand {dist:.0f} mm away, {p[2]:+.0f} mm above rim; "
-                        f"Y{y:.0f} to Y{target:.0f}; frame to command {1000 * (time.monotonic() - seen_at):.0f} ms")
+                    state["text"] = f"{kind.upper()} to Y{target:.0f}"
+                    say(f"{kind}: hand {dist:.0f} mm away, {p[2]:+.0f} mm above rim; Y{y:.0f} to Y{target:.0f}"
+                        + (f" then back to Y{pending:.0f}" if kind == "feint" else "")
+                        + f"; frame to command {1000 * (time.monotonic() - seen_at):.0f} ms")
             elif not moving and now - last_near > a.rest_after and abs(y - a.rest) > 2 and not state["banner"]:
                 axis.move(a.rest, 100, 1000)
                 state["text"] = "back to rest"
