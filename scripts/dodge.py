@@ -23,10 +23,12 @@ and until the hand has come --hyst mm closer than it has been since (so a hand h
 the ends does not send the bowl back and forth); a hand over the opening always counts. A
 dropped frame or two does not reset that; only half a second with no hand does.
 
-Feints: a random --feint share of dodges go only 40 to 80% of the way, then dart back to the end
-they came from, so a hand that has learned to follow it is caught out. The return is called off
-if a hand below the rim is in its way, or a hand is over the spot it would go back to (that hand
-did not follow, and the bowl would land under it); the bowl then goes on to an end instead.
+Feints (off unless --feint is given): a random --feint share of dodges go only 40 to 80% of the
+way, then dart back to the end they came from, so a hand that has learned to follow it is caught
+out. The return is called off if a hand below the rim is in its way, or a hand is over the spot it
+would go back to (that hand did not follow, and the bowl would land under it); the bowl then goes
+on to an end instead. On the bench (2026-10-30) every return was called off, so a feint was just
+a dodge in two steps; hence off.
 Hand points below the rim never trigger a dodge, and if one is in the bowl or in its path, the
 bowl stays put: moving into a hand made it lose steps.
 Lost steps: whenever the bowl is still, the base marker's position is compared with the axis.
@@ -194,7 +196,8 @@ def main() -> int:
     ap.add_argument("--accel", type=float, default=7000, help="dodge acceleration, mm/s^2")
     ap.add_argument("--trigger", type=float, default=250, help="dodge when a hand point is this close, mm")
     ap.add_argument("--height", type=float, default=250, help="...and at most this high above the rim, mm")
-    ap.add_argument("--feint", type=float, default=0.3, help="share of dodges that are feints, 0 to 1")
+    ap.add_argument("--feint", type=float, default=0.0, help="share of dodges that are feints, 0 to 1 (off: they "
+                    "stopped part way and went on in two steps)")
     ap.add_argument("--hyst", type=float, default=50, help="after a move, the hand must come this much closer, mm")
     ap.add_argument("--slip", type=float, default=6.0, help="marker vs axis difference that means lost steps, mm")
     ap.add_argument("--max-err", type=float, default=20.0, help="reject hand pairs above this px error")
