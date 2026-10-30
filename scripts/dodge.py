@@ -41,7 +41,7 @@ import time
 import cv2
 import numpy as np
 
-from bowl_calibrate import BOWL_FILE, draw_markers, marker_lines, match_markers
+from bowl_calibrate import BOWL_FILE, draw_markers, match_markers
 from hand3d import Detector, Map, Tracker, draw_hand, ensure_model, match_hands
 from rim_calibrate import RIM_FILE, rail_frame
 from stereo import CALIB_FILE, HEIGHT, WIDTH, Calibration, open_cameras, wait_for_frames
@@ -203,6 +203,8 @@ def main() -> int:
 
     m = Marlin(a.port) if a.port else None
     cams, dets = [], []
+    cv2.namedWindow("dodge", cv2.WINDOW_NORMAL)  # resizable, to fit the screen
+    cv2.resizeWindow("dodge", WIDTH * 3 // 4, (70 + HEIGHT // 2 + 420) * 3 // 4)
     try:
         cams = open_cameras(a.cams, a.exposure)
         wait_for_frames(cams)
@@ -249,23 +251,22 @@ def main() -> int:
                 draw_hand(v0, hands0[i0], tr.colour)
                 draw_hand(v1, hands1[i1], tr.colour)
             view = np.hstack([cv2.resize(v0, (WIDTH // 2, HEIGHT // 2)), cv2.resize(v1, (WIDTH // 2, HEIGHT // 2))])
-            lines = [(("DRY RUN  " if m is None else "") + state["text"], (0, 255, 255)),
-                     (f"axis Y {y:.0f}" + ("  moving" if axis.moving(now) else "")
-                      + ("" if rail.base_id not in marks else
-                         f"   marker says Y {rail.marker_y(marks[rail.base_id][0].mean(axis=0)):.0f}"),
-                      (255, 255, 255))]
-            for tr, rp in near_pts:
-                lines.append((f"hand {tr.number}: {np.hypot(rp[0], rp[1]):.0f} mm from rim centre, "
-                              f"{rp[2]:+.0f} mm above rim", tr.colour))
-            lines += marker_lines(mk0, mk1, marks)[:2]
-            lines += [(t, (200, 200, 200)) for t in state["log"]]
-            for k, (text, c) in enumerate(lines):
-                cv2.putText(view, text, (10, 25 + 24 * k), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4)
-                cv2.putText(view, text, (10, 25 + 24 * k), cv2.FONT_HERSHEY_SIMPLEX, 0.6, c, 2)
-            if state["banner"]:
-                cv2.rectangle(view, (0, HEIGHT // 2 - 50), (WIDTH, HEIGHT // 2), (0, 0, 180), -1)
-                cv2.putText(view, state["banner"], (10, HEIGHT // 2 - 17), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
-                            (255, 255, 255), 2)
+            # Status bar above the pictures, nothing written over them: the state, big, coloured
+            # by what the bowl is doing, and one small line of numbers.
+            text = state["banner"] or (("DRY RUN: " if m is None else "") + state["text"])
+            upper = text.upper()
+            bg = ((0, 0, 170) if state["banner"] else (0, 0, 150) if axis.moving(now)
+                  else (0, 110, 160) if upper.startswith("HOLDING") or "HOM" in upper else (40, 40, 40))
+            bar = np.full((70, WIDTH, 3), bg, np.uint8)
+            cv2.putText(bar, text, (12, 38), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+            info = f"bowl Y {y:.0f}"
+            if near_pts:
+                tr, rp = min(near_pts, key=lambda n: np.hypot(n[1][0], n[1][1]))
+                info += f"     hand {np.hypot(rp[0], rp[1]):.0f} mm from bowl, {rp[2]:+.0f} mm above rim"
+            else:
+                info += "     no hand"
+            cv2.putText(bar, info, (12, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
+            view = np.vstack([bar, view])
             seen = {tr.number for tr, _ in current}
             table_map.update(now, tracker, seen)
             mp = table_map.draw(now, tracker, seen, marks)
