@@ -1,7 +1,7 @@
 """Write the bowl markers as an A4 PDF to print at actual size.
 
-    uv run python scripts/make_marker.py                     # ids 1 and 2, 2 mm band
-    uv run python scripts/make_marker.py --ids 0 1 --band 5  # the first sheet
+    uv run python scripts/make_marker.py                  # ids 0 and 1, 5 mm band
+    uv run python scripts/make_marker.py --ids 1 --band 2 # one marker, thin band
 
 Print at 100% or "actual size" (not "fit to page"), then measure each black square edge to edge.
 If one is not the size printed under it, note the measured size. Cut along the grey line: the
@@ -23,8 +23,8 @@ GAP_MM = 30.0  # space between the markers on the page
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ids", type=int, nargs="+", default=[1, 2], choices=sorted(MARKERS_MM))
-    ap.add_argument("--band", type=float, default=2.0, help="white band round each black square, mm")
+    ap.add_argument("--ids", type=int, nargs="+", default=[0, 1], choices=sorted(MARKERS_MM))
+    ap.add_argument("--band", type=float, default=5.0, help="white band round each black square, mm")
     a = ap.parse_args()
     page_w, page_h = 210.0, 297.0
     total = sum(MARKERS_MM[i] for i in a.ids) + GAP_MM * (len(a.ids) - 1)
