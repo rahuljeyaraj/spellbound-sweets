@@ -211,6 +211,7 @@ def main() -> int:
         dry_placed = False
         slips = 0
         ref = a.trigger + a.hyst
+        last_hold = None
 
         def say(text: str) -> None:
             print(text)
@@ -378,13 +379,21 @@ def main() -> int:
                 ref = min(a.trigger + a.hyst, max(ref, dist))
             reaching = dist < a.trigger and dist < ref - a.hyst
 
+            # Why the bowl is not moving although a hand is near, logged when it changes.
+            hold = None
+            if not moving and not reaching:
+                if dist < a.trigger:
+                    hold = f"holding: hand still at {dist:.0f} mm, must come within {ref - a.hyst:.0f} mm"
+                elif path_blocked(low, 0.0, rail.radius):
+                    hold = "holding: hand below the rim at the bowl"
+
             if reaching and not moving and state["enabled"] and not state["banner"]:
                 p = min(reach, key=lambda q: np.hypot(q[0], q[1]))
                 target = dodge_target(y, p[0])
                 if abs(target - y) <= 5:
-                    state["text"] = "cornered at the end of the rail"
+                    hold = "holding: cornered at the end of the rail"
                 elif path_blocked(low, (target - y) * rail.scale, rail.radius):
-                    state["text"] = "hand beside the bowl: staying put"
+                    hold = "holding: hand below the rim in the bowl's path"
                 else:
                     seen_at = max(s0, s1)  # when the newer of the two frames was taken
                     axis.move(target, a.speed, a.accel)
@@ -396,6 +405,12 @@ def main() -> int:
                 state["text"] = "back to rest"
             elif not moving and not reaching:
                 state["text"] = "watching" if state["enabled"] else "dodging off"
+            if hold:
+                state["text"] = hold
+            if (hold or "").split(" at ")[0] != (last_hold or "").split(" at ")[0]:
+                if hold:
+                    say(hold)
+                last_hold = hold
 
             draw(got, now, current, marks, near_pts)
     except KeyboardInterrupt:
