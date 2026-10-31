@@ -4,3 +4,4 @@ __pycache__/
 models/
 # Calibration photos show the room; the result only fits these cameras on this mount
 calib/
+.claude/settings.local.json
