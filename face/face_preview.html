@@ -66,7 +66,7 @@ input[type=range] { accent-color: var(--accent); width: 150px; }
   </div>
 
   <div class="row">
-    <label for="bright">Brightness <input id="bright" type="range" min="5" max="100" value="25"> <output id="bright-out">25%</output></label>
+    <label for="bright">Brightness <input id="bright" type="range" min="5" max="100" value="100"> <output id="bright-out">100%</output></label>
     <span class="stat">LEDs lit: <b id="lit-out">0</b> of 160</span>
     <span class="stat">Draw: <b id="amp-out">0.00 A</b> at 5 V</span>
   </div>
@@ -260,7 +260,7 @@ const eyeNow = [new Float32Array(RING_N * 3), new Float32Array(RING_N * 3)];
 const mouthNow = new Float32Array(128 * 3);
 
 let pickMood = 'auto', waitStyle = 'sleeping', slackStyle = 'crying', mood = 'waiting', hand = null;
-let bright = 0.25;
+let bright = 1;
 
 function mouthTarget(m) {
   const out = new Float32Array(128 * 3);
