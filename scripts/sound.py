@@ -823,7 +823,8 @@ class Sound:
                 self.play("wake", now)
             elif old in ("w", "n") and mood == "s":
                 self.play("settle", now)
-            elif mood == "n" and in_bowl and now - self.last_move > 1.5:
+            elif mood == "n" and in_bowl and now - self.last_move > 1.5 and now - self.grumbled >= TIMING["grumble_rest"]:
+                self.grumbled = now
                 self.play("grumble", now)  # a hand got into the bowl without a dodge
         if in_bowl:
             self.in_bowl_since_move = True
@@ -931,26 +932,27 @@ class Sound:
 
 # ---- the speaker ----
 
-def find_speaker(want: str | None) -> int:
-    """The output device: a number, part of a name, or (None/auto) the USB speaker. Several
-    entries share each name (one per Windows sound system); WASAPI is picked when there is one,
-    as it runs at 48 kHz with little delay. The monitors' outputs are never picked by themselves."""
+def find_speakers(want: str | None) -> list[int]:
+    """The output devices to try, best first: a number, part of a name, or (None/auto) the USB
+    speaker. Several entries share each name (one per Windows sound system); WASAPI comes first,
+    as it runs at 48 kHz with little delay, then MME. The monitors' outputs are never picked by
+    themselves."""
     import sounddevice as sd
     devs = sd.query_devices()
     apis = [h["name"] for h in sd.query_hostapis()]
     outs = [(i, d) for i, d in enumerate(devs) if d["max_output_channels"] > 0]
     rank = lambda i_d: ("WASAPI" not in apis[i_d[1]["hostapi"]], "MME" not in apis[i_d[1]["hostapi"]])
     if want and want.isdigit():
-        return int(want)
+        return [int(want)]
     if want and want != "auto":
         hits = [o for o in outs if want.lower() in o[1]["name"].lower()]
         if not hits:
             raise RuntimeError(f"no output device named like {want!r}")
-        return sorted(hits, key=rank)[0][0]
-    hits = [o for o in outs if "usb" in o[1]["name"].lower()]
-    if not hits:
-        raise RuntimeError("no USB speaker found (use --sound-device)")
-    return sorted(hits, key=rank)[0][0]
+    else:
+        hits = [o for o in outs if "usb" in o[1]["name"].lower()]
+        if not hits:
+            raise RuntimeError("no USB speaker found (use --sound-device)")
+    return [i for i, _ in sorted(hits, key=rank)]
 
 
 class Live:
@@ -960,10 +962,6 @@ class Live:
     def __init__(self, mixer: Mixer, device: str | None, volume: float, record: str | None) -> None:
         import sounddevice as sd
         self.mixer, self.volume = mixer, float(volume)
-        self.index = find_speaker(device)
-        info = sd.query_devices(self.index)
-        self.name = f"{info['name']} ({sd.query_hostapis(info['hostapi'])['name']}, device {self.index})"
-        self.channels = min(2, info["max_output_channels"])
         self.underflows = 0
         self.blocks = 0
         self.failed = False
@@ -974,9 +972,23 @@ class Live:
             self.rec_thread = threading.Thread(target=self._write, args=(record,), daemon=True)
             self.rec_thread.start()
             mixer.tap = lambda block: self.rec_q.put(block.copy())
-        self.stream = sd.OutputStream(samplerate=SR, blocksize=BLOCK, channels=self.channels, dtype="float32",
-                                      device=self.index, latency=LATENCY, callback=self._callback)
-        self.stream.start()
+        failed = []
+        for self.index in find_speakers(device):  # the best way to the speaker that opens
+            info = sd.query_devices(self.index)
+            self.name = f"{info['name']} ({sd.query_hostapis(info['hostapi'])['name']}, device {self.index})"
+            self.channels = min(2, info["max_output_channels"])
+            try:
+                self.stream = sd.OutputStream(samplerate=SR, blocksize=BLOCK, channels=self.channels,
+                                              dtype="float32", device=self.index, latency=LATENCY,
+                                              callback=self._callback)
+                self.stream.start()
+                break
+            except Exception as e:
+                failed.append(f"{self.name}: {e}")
+        else:
+            raise RuntimeError("; ".join(failed))
+        for f in failed:
+            print(f"sound: could not open {f}", flush=True)
         self.latency = float(self.stream.latency)
 
     def _callback(self, outdata, frames, time_info, status) -> None:
@@ -1333,7 +1345,7 @@ def main() -> int:
     if a.devices:
         import sounddevice as sd
         print(sd.query_devices())
-        print("picked:", find_speaker(a.sound_device))
+        print("picked, best first:", find_speakers(a.sound_device))
         return 0
     if a.demo:
         script, seconds, timeline = demo_round()
