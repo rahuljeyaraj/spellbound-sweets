@@ -6,4 +6,7 @@ dependencies = [
     "mediapipe>=1.2.0",
     "numpy>=2.4.6",
     "pyserial>=3.5",
+    "scipy>=1.17.1",
+    "sounddevice>=0.5.6",
+    "soundfile>=0.14.0",
 ]
