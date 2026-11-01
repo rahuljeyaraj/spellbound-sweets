@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -257,6 +258,8 @@ def main() -> int:
     ap.add_argument("--slip", type=float, default=6.0, help="marker vs axis difference that means lost steps, mm")
     ap.add_argument("--max-err", type=float, default=20.0, help="reject hand pairs above this px error")
     ap.add_argument("--spread", action="store_true", help="Y driver in spreadCycle: louder, more torque at speed")
+    ap.add_argument("--misses", action="store_true",
+                    help="save both cameras' pictures to runs/misses when a hand is seen by one camera only")
     a = ap.parse_args()
 
     cal = Calibration.load()
@@ -277,6 +280,7 @@ def main() -> int:
     face = Face(face_port) if face_port else None
     print(f"face on {face_port}" if face else "no face", flush=True)
     cams, dets = [], []
+    seen_by = {k: 0 for k in ("both", "cam0 only", "cam1 only", "rejected", "none")}  # frames, for the end
     cv2.namedWindow("dodge", cv2.WINDOW_NORMAL)  # resizable, to fit the screen
     cv2.resizeWindow("dodge", WIDTH * 3 // 4, (70 + HEIGHT // 2 + 420) * 3 // 4)
     try:
@@ -285,7 +289,8 @@ def main() -> int:
         dets = [Detector(c, 2) for c in cams]
         tracker = Tracker(0.5)
         axis = Axis(m, YMIN)
-        state = {"text": "starting", "banner": None, "enabled": True, "stopped": False, "log": []}
+        state = {"text": "starting", "banner": None, "enabled": True, "stopped": False, "log": [],
+                 "missed": [[0, 0.0], [0, 0.0]]}  # per camera: times and seconds it missed a hand the other had
         last_seq = [0, 0]
         still_since = time.monotonic()
         dry_placed = False
@@ -301,6 +306,12 @@ def main() -> int:
         snarl_until = 0.0  # the face snarls until then, after a dodge
         hand_any = 0.0  # when either camera last saw a hand
         rng = np.random.default_rng()
+        # A hand that gets no 3D position is shown on the status bar, and with --misses saved
+        # when it lasts.
+        miss_from: float | None = None
+        last_kind, last_now = "none", 0.0
+        miss_saved = 0.0
+        miss_dir = Path(__file__).resolve().parent.parent / "runs" / "misses"
 
         def say(text: str) -> None:
             print(text, flush=True)
@@ -341,6 +352,11 @@ def main() -> int:
                         cv2.rectangle(v, (x - 6, y - th - 10), (x + tw + 6, y + 10), (200, 0, 200), -1)
                         cv2.putText(v, "HORNS", (x, y), cv2.FONT_HERSHEY_SIMPLEX, 1.6, (255, 255, 255), 4,
                                     cv2.LINE_AA)
+            # Debug counter: how often this camera missed a hand that the other one found.
+            for v, (times, secs) in zip((v0, v1), state["missed"]):
+                label = f"missed a hand {times}x, {secs:.1f} s"
+                for colour, thick in (((0, 0, 0), 8), ((0, 255, 255) if times else (255, 255, 255), 3)):
+                    cv2.putText(v, label, (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.4, colour, thick, cv2.LINE_AA)
             view =np.hstack([cv2.resize(v0, (WIDTH // 2, HEIGHT // 2)), cv2.resize(v1, (WIDTH // 2, HEIGHT // 2))])
             # Status bar above the pictures, nothing written over them: the state, big, coloured
             # by what the bowl is doing, and one small line of numbers.
@@ -357,6 +373,7 @@ def main() -> int:
                 info += f"     hand {np.hypot(rp[0], rp[1]):.0f} mm from bowl, {rp[2]:+.0f} mm above rim"
             else:
                 info += "     no hand"
+            info += f"     {state.get('seen', '')}"
             if horns_from is not None:
                 info += f"     horns {now - horns_from:.1f} s"
             if face:
@@ -461,6 +478,39 @@ def main() -> int:
             (f0, s0, hands0, mk0), (f1, s1, hands1, mk1) = got[0][0], got[1][0]
             found = match_hands(cal, hands0, hands1, a.max_err)
             current = tracker.update(now, found)
+
+            # A hand left without a partner: the other camera did not find it, or both did and the
+            # pair was rejected (its error is above --max-err).
+            left0 = [h for i, h in enumerate(hands0) if i not in {f[2] for f in found}]
+            left1 = [h for i, h in enumerate(hands1) if i not in {f[3] for f in found}]
+            kind = ("rejected" if left0 and left1 else "cam0 only" if left0 else "cam1 only" if left1
+                    else "both" if found else "none")
+            seen_by[kind] += 1
+            for k, other_only in ((0, "cam1 only"), (1, "cam0 only")):
+                if kind == other_only:
+                    state["missed"][k][0] += last_kind != kind
+                    if last_kind == kind:
+                        state["missed"][k][1] += now - last_now
+            last_kind, last_now = kind, now
+            state["seen"] = f"cams {len(hands0)}/{len(hands1)}"
+            if kind == "rejected":
+                err = min(cal.reprojection_error(cal.triangulate(h0, h1), h0, h1) for h0 in left0 for h1 in left1)
+                state["seen"] += f" rejected {err:.0f} px"
+            elif kind.endswith("only"):
+                state["seen"] += f" {kind}"
+            if kind in ("both", "none"):
+                miss_from = None
+            else:
+                miss_from = now if miss_from is None else miss_from
+                if a.misses and now - miss_from >= 0.3 and now - miss_saved >= 1.0:
+                    miss_saved = now
+                    stamp = time.strftime("%Y%m%d-%H%M%S")
+                    miss_dir.mkdir(parents=True, exist_ok=True)
+                    cv2.imwrite(str(miss_dir / f"{stamp}_cam0.jpg"), f0)
+                    cv2.imwrite(str(miss_dir / f"{stamp}_cam1.jpg"), f1)
+                    size = lambda hs: " ".join(f"{np.ptp(h[:, 0]):.0f}x{np.ptp(h[:, 1]):.0f}" for h in hs) or "-"
+                    print(f"miss {stamp}: {state['seen']}; hand boxes px cam0 {size(hands0)}, cam1 {size(hands1)}",
+                          flush=True)
             marks = match_markers(cal, mk0, mk1)
             y = axis.y(now)
 
@@ -622,6 +672,10 @@ def main() -> int:
             m.ser.write(b"M410\n")
         print("stopped")
     finally:
+        total = sum(seen_by.values()) - seen_by["none"]
+        if total:
+            print("frames with a hand: " + ", ".join(f"{k} {100 * n / total:.0f}%"
+                                                     for k, n in seen_by.items() if k != "none"), flush=True)
         for d in dets:
             d.close()
         for c in cams:
