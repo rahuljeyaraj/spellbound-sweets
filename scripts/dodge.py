@@ -36,7 +36,21 @@ If they differ by more than --slip mm, it re-homes by itself (about 3 s) and goe
 G92: Marlin shifts its soft limits with it, so a stall point became a wall.) 800 mm/s at 8000 mm/s2 with the bowl lost steps on long moves
 (2026-10-30); 700 at 7000 was the last clean bench speed with weight on.
 
-Keys: q quit, h re-home, d dodging on or off.
+Horns: a hand showing the horns (index and little finger up, middle and ring folded) for
+--horns-hold s, seen by either camera on its own, stops the game: any feint return is dropped and the bowl slides to the middle of
+the rail at the gentle --slide speed and stays there, so a sweet can be taken. Only a hand below
+the rim in its way holds the slide up. From when it gets there, the kids have --resume s to take
+a sweet, counted down on the screen; then dodging starts again whatever the hands are doing (or
+at once on d), and the bowl goes on to an end as usual, unless a hand is still in it. The horns
+must be dropped and shown again to stop it again, so holding them up does not stop it for good.
+
+Face: the LED face (leds/src/main.cpp) is found on USB by itself (--face). It sleeps when no
+hand has been seen for 2 s, watches while one is about, snarls for 1.5 s from each dodge or
+feint and while a hand is in the bowl, and cries while the horns have stopped the game. The
+eyes follow the hand nearest the bowl along the rail, from the rail's middle; --face-flip if
+they look the wrong way. If dodge.py stops sending, the face falls asleep after 2 s.
+
+Keys: q quit, h re-home, d dodging on or off (and ends a horns stop).
 """
 
 from __future__ import annotations
@@ -46,15 +60,18 @@ import time
 
 import cv2
 import numpy as np
+import serial
+from serial.tools import list_ports
 
 from bowl_calibrate import BOWL_FILE, draw_markers, match_markers
-from hand3d import Detector, Map, Tracker, draw_hand, ensure_model, match_hands
+from hand3d import Detector, Map, Tracker, draw_hand, ensure_model, is_horns, match_hands
 from rim_calibrate import RIM_FILE, rail_frame
 from stereo import CALIB_FILE, HEIGHT, WIDTH, Calibration, open_cameras, wait_for_frames
 from y_speed import y_switch_triggered
 from y_sweep import Marlin
 
 YMIN, YMAX = 5.0, 215.0
+YMID = (YMIN + YMAX) / 2
 LAG = 0.08  # s from sending a move to the bed starting (bench-log: measured 0.08 to 0.1 s over)
 FORGET = 0.5  # s with no hand near before the hysteresis starts afresh (the tracker's forget time)
 
@@ -152,6 +169,43 @@ class Axis:
         return now < self.t0 + self.dur
 
 
+FACE_VID = 0x2886  # Seeed: the XIAO RP2350 that drives the face LEDs
+MOODS = {"s": "sleeping", "w": "watching", "n": "snarl", "c": "crying"}
+
+
+class Face:
+    """The LED face (leds/src/main.cpp) on its own USB serial port. Gets a line with the mood
+    letter and where the hand is, -100 (the face's far left) to 100, up to 20 times a second.
+    If the lines stop, the face goes to sleep by itself after 2 s."""
+
+    def __init__(self, port: str) -> None:
+        self.ser = serial.Serial(port, 115200, timeout=0, write_timeout=0.05)
+        self.mood = ""
+        self.sent = 0.0
+
+    def set(self, mood: str, hand_x: float | None, now: float) -> None:
+        if mood == self.mood and now - self.sent < 0.05:
+            return
+        line = mood + ("" if hand_x is None else str(round(float(np.clip(hand_x, -1, 1)) * 100)))
+        try:
+            self.ser.write((line + "\n").encode())
+            self.ser.reset_input_buffer()  # it prints its mood changes; nobody reads them
+        except serial.SerialException as e:
+            print(f"face: {e}", flush=True)
+        self.mood, self.sent = mood, now
+
+    def close(self) -> None:
+        try:
+            self.ser.write(b"s\n")
+        except serial.SerialException:
+            pass
+        self.ser.close()
+
+
+def find_face() -> str | None:
+    return next((p.device for p in list_ports.comports() if p.vid == FACE_VID), None)
+
+
 def dodge_target(y: float, hand_along: float) -> float:
     """Where to send the bowl: the end of the rail furthest from the hand. Always an end, never
     a short step, so it jumps away instead of seeming to follow the hand. hand_along is from the
@@ -186,12 +240,20 @@ def main() -> int:
     ap.add_argument("--port", help="the SKR's serial port, e.g. COM9; leave out for a dry run")
     ap.add_argument("--cams", type=int, nargs=2, default=[0, 1], help="camera numbers (2 is OBS)")
     ap.add_argument("--exposure", type=float, help="lock exposure (e.g. -5); default auto")
+    ap.add_argument("--gain", type=float, nargs=2, default=[0, 32],
+                    help="gain per camera; 32 on camera 1 matches its brightness to camera 0")
     ap.add_argument("--speed", type=float, default=700, help="dodge top speed, mm/s")
     ap.add_argument("--accel", type=float, default=7000, help="dodge acceleration, mm/s^2")
     ap.add_argument("--trigger", type=float, default=250, help="dodge when a hand point is this close, mm")
     ap.add_argument("--height", type=float, default=250, help="...and at most this high above the rim, mm")
     ap.add_argument("--feint", type=float, default=0.3, help="share of dodges that are feints, 0 to 1")
     ap.add_argument("--hyst", type=float, default=50, help="after a move, the hand must come this much closer, mm")
+    ap.add_argument("--horns-hold", type=float, default=0.3, help="horns held this long stop the game, s")
+    ap.add_argument("--resume", type=float, default=10.0, help="after a horns stop, time to take a sweet in the middle, s")
+    ap.add_argument("--slide", type=float, default=150, help="speed of the slide to the middle, mm/s")
+    ap.add_argument("--slide-accel", type=float, default=1000, help="acceleration of that slide, mm/s^2")
+    ap.add_argument("--face", default="auto", help="the LED face's serial port; auto finds it, none for no face")
+    ap.add_argument("--face-flip", action="store_true", help="the eyes look the wrong way: mirror them")
     ap.add_argument("--slip", type=float, default=6.0, help="marker vs axis difference that means lost steps, mm")
     ap.add_argument("--max-err", type=float, default=20.0, help="reject hand pairs above this px error")
     ap.add_argument("--spread", action="store_true", help="Y driver in spreadCycle: louder, more torque at speed")
@@ -206,20 +268,24 @@ def main() -> int:
         if not f.exists():
             raise SystemExit(f"run {how} first")
     rail = Rail(cal)
-    table_map = Map(cal, 600.0, None)
+    # Centred on the middle of the rail: the board's spot can be far off since the cameras moved.
+    table_map = Map(cal, 400.0, None, centre=rail.rim_centre(YMID))
     ensure_model()
 
     m = Marlin(a.port) if a.port else None
+    face_port = None if a.face == "none" else find_face() if a.face == "auto" else a.face
+    face = Face(face_port) if face_port else None
+    print(f"face on {face_port}" if face else "no face", flush=True)
     cams, dets = [], []
     cv2.namedWindow("dodge", cv2.WINDOW_NORMAL)  # resizable, to fit the screen
     cv2.resizeWindow("dodge", WIDTH * 3 // 4, (70 + HEIGHT // 2 + 420) * 3 // 4)
     try:
-        cams = open_cameras(a.cams, a.exposure)
+        cams = open_cameras(a.cams, a.exposure, a.gain)
         wait_for_frames(cams)
         dets = [Detector(c, 2) for c in cams]
         tracker = Tracker(0.5)
         axis = Axis(m, YMIN)
-        state = {"text": "starting", "banner": None, "enabled": True, "log": []}
+        state = {"text": "starting", "banner": None, "enabled": True, "stopped": False, "log": []}
         last_seq = [0, 0]
         still_since = time.monotonic()
         dry_placed = False
@@ -228,10 +294,16 @@ def main() -> int:
         hand_seen = 0.0  # when a hand was last in reach height
         last_hold = None
         pending: float | None = None  # where a feint goes back to once its first move ends
+        horns_from: float | None = None  # when the horns were first seen, while they are held
+        horns_last = 0.0
+        horns_spent = False  # these horns have stopped it once; they must be dropped first
+        free_until: float | None = None  # when a horns stop ends, once the bowl is in the middle
+        snarl_until = 0.0  # the face snarls until then, after a dodge
+        hand_any = 0.0  # when either camera last saw a hand
         rng = np.random.default_rng()
 
         def say(text: str) -> None:
-            print(text)
+            print(text, flush=True)
             state["log"] = (state["log"] + [text])[-5:]
 
         def frame_view() -> tuple | None:
@@ -258,29 +330,62 @@ def main() -> int:
             for tr, (_, _, i0, i1) in current:
                 draw_hand(v0, hands0[i0], tr.colour)
                 draw_hand(v1, hands1[i1], tr.colour)
-            view = np.hstack([cv2.resize(v0, (WIDTH // 2, HEIGHT // 2)), cv2.resize(v1, (WIDTH // 2, HEIGHT // 2))])
+            # HORNS on every hand that counts as horns: on that camera's own picture, or in 3D.
+            # Shown in every phase, so you can find the directions that work.
+            horns3d = [(i0, i1) for _, (pts, _, i0, i1) in current if is_horns(pts)]
+            for k, (v, hs) in enumerate(((v0, hands0), (v1, hands1))):
+                for i, h in enumerate(hs):
+                    if is_horns(h) or any(pair[k] == i for pair in horns3d):
+                        x, y = int(h[:, 0].min()), max(int(h[:, 1].min()) - 15, 40)
+                        (tw, th), _ = cv2.getTextSize("HORNS", cv2.FONT_HERSHEY_SIMPLEX, 1.6, 4)
+                        cv2.rectangle(v, (x - 6, y - th - 10), (x + tw + 6, y + 10), (200, 0, 200), -1)
+                        cv2.putText(v, "HORNS", (x, y), cv2.FONT_HERSHEY_SIMPLEX, 1.6, (255, 255, 255), 4,
+                                    cv2.LINE_AA)
+            view =np.hstack([cv2.resize(v0, (WIDTH // 2, HEIGHT // 2)), cv2.resize(v1, (WIDTH // 2, HEIGHT // 2))])
             # Status bar above the pictures, nothing written over them: the state, big, coloured
             # by what the bowl is doing, and one small line of numbers.
             text = state["banner"] or (("DRY RUN: " if m is None else "") + state["text"])
             upper = text.upper()
-            bg = ((0, 0, 170) if state["banner"] else (0, 0, 150) if axis.moving(now)
+            bg = ((0, 0, 170) if state["banner"] else (130, 0, 130) if state["stopped"]
+                  else (0, 0, 150) if axis.moving(now)
                   else (0, 110, 160) if upper.startswith("HOLDING") or "HOM" in upper else (40, 40, 40))
             bar = np.full((70, WIDTH, 3), bg, np.uint8)
-            cv2.putText(bar, text, (12, 38), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+            cv2.putText(bar, text, (12, 38), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2, cv2.LINE_AA)
             info = f"bowl Y {y:.0f}"
             if near_pts:
                 tr, rp = min(near_pts, key=lambda n: np.hypot(n[1][0], n[1][1]))
                 info += f"     hand {np.hypot(rp[0], rp[1]):.0f} mm from bowl, {rp[2]:+.0f} mm above rim"
             else:
                 info += "     no hand"
-            cv2.putText(bar, info, (12, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
+            if horns_from is not None:
+                info += f"     horns {now - horns_from:.1f} s"
+            if face:
+                info += f"     face {MOODS.get(face.mood, 'off')}"
+            cv2.putText(bar, info, (12, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1, cv2.LINE_AA)
             view = np.vstack([bar, view])
             seen = {tr.number for tr, _ in current}
             table_map.update(now, tracker, seen)
             mp = table_map.draw(now, tracker, seen, marks)
             for r, thick in ((rail.radius, 3), (a.trigger, 1)):
                 cv2.circle(mp, table_map.px(rail.rim_centre(y)), int(r * table_map.scale), colour, thick)
-            cv2.imshow("dodge", np.vstack([view, mp]))
+            show(np.vstack([view, mp]))
+
+        def show(img: np.ndarray) -> None:
+            """Fit the picture to the window here, keeping its shape. Left to itself, Windows
+            stretches it to the window's shape and shrinks it without smoothing (jagged text)."""
+            try:
+                _, _, w, h = cv2.getWindowImageRect("dodge")
+            except cv2.error:
+                w = h = 0
+            if w > 0 and h > 0:  # 0 when minimised
+                s = min(w / img.shape[1], h / img.shape[0])
+                fit = cv2.resize(img, (max(1, round(img.shape[1] * s)), max(1, round(img.shape[0] * s))),
+                                 interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_LINEAR)
+                canvas = np.zeros((h, w, 3), np.uint8)
+                y0, x0 = (h - fit.shape[0]) // 2, (w - fit.shape[1]) // 2
+                canvas[y0:y0 + fit.shape[0], x0:x0 + fit.shape[1]] = fit
+                img = canvas
+            cv2.imshow("dodge", img)
 
         def anchor(y_now: float) -> None:
             """Bed still at a known Y (just homed): measure the base marker and re-place the rail."""
@@ -339,7 +444,11 @@ def main() -> int:
             if key == ord("q"):
                 break
             if key == ord("d"):
-                state["enabled"] = not state["enabled"]
+                if state["stopped"]:
+                    state["stopped"] = False
+                    state["enabled"] = True
+                else:
+                    state["enabled"] = not state["enabled"]
                 say("dodging " + ("on" if state["enabled"] else "off"))
             if key == ord("h") and m and not axis.moving(time.monotonic()):
                 axis = rehome("re-homing")
@@ -363,6 +472,27 @@ def main() -> int:
             reach = [p for _, rp in hand_rps for p in rp if 0 <= p[2] < a.height]
             dist = min((float(np.hypot(p[0], p[1])) for p in reach), default=np.inf)
             low = np.array([p for _, rp in hand_rps for p in rp if p[2] < 0]).reshape(-1, 3)
+
+            # Horns held for --horns-hold s stop the game. A dropped frame or two does not restart
+            # the count. Once stopped, it lasts --resume s from the bowl reaching the middle. One
+            # camera seeing them on its own picture is enough; so is the 3D hand.
+            if (any(is_horns(h) for h in hands0 + hands1)
+                    or any(is_horns(pts) for _, (pts, _, _, _) in current)):
+                horns_last = now
+                horns_from = now if horns_from is None else horns_from
+            elif horns_from is not None and now - horns_last > 0.15:
+                horns_from = None
+                horns_spent = False
+            if (not state["stopped"] and not horns_spent and horns_from is not None
+                    and now - horns_from >= a.horns_hold):
+                state["stopped"] = True
+                horns_spent = True
+                free_until = None
+                pending = None
+                say("horns: stopped, sliding to the middle")
+            elif state["stopped"] and free_until is not None and now > free_until:
+                state["stopped"] = False
+                say(f"{a.resume:g} s up: dodging again")
 
             if m is None and not dry_placed and rail.base_id in marks:
                 # Dry run: start the pretend axis where the bowl really is.
@@ -402,14 +532,28 @@ def main() -> int:
 
             # Why the bowl is not moving although a hand is near, logged when it changes.
             hold = None
-            if not moving and not reaching and not between:
+            if not moving and not reaching and not between and not state["stopped"]:
                 if dist < a.trigger:
                     hold = (f"holding: hand still at {dist:.0f} mm, must come within "
                             f"{max(ref - a.hyst, rail.radius):.0f} mm")
                 elif path_blocked(low, 0.0, rail.radius):
                     hold = "holding: hand below the rim at the bowl"
 
-            if pending is not None and not moving:
+            if state["stopped"]:
+                # Horns: slide to the middle and stay there, whatever the hands do, unless a low
+                # hand is in the way.
+                if moving or abs(y - YMID) <= 2:
+                    if not moving:
+                        if free_until is None:
+                            free_until = now + a.resume
+                            say(f"in the middle: {a.resume:g} s to take a sweet")
+                        state["text"] = f"STOPPED (horns): take a sweet! Dodging again in {np.ceil(free_until - now):.0f} s"
+                elif path_blocked(low, (YMID - y) * rail.scale, rail.radius):
+                    hold = "holding: hand below the rim in the way to the middle"
+                elif not state["banner"]:
+                    axis.move(YMID, a.slide, a.slide_accel)
+                    state["text"] = f"HORNS: sliding to Y{YMID:.0f}"
+            elif pending is not None and not moving:
                 # Second half of a feint: dart back, even onto a hand waiting there (the bowl dodges
                 # it again at once), unless a low hand is now in the way. Called off, the bowl is
                 # between the ends and goes on to one.
@@ -417,6 +561,7 @@ def main() -> int:
                     say("feint: return cancelled, hand in the way")
                 else:
                     axis.move(pending, a.speed, a.accel)
+                    snarl_until = now + 1.5
                     state["text"] = f"FEINT back to Y{pending:.0f}"
                     moving = True
                 pending = None
@@ -438,9 +583,10 @@ def main() -> int:
                     if not between and rng.random() < a.feint:
                         # Feint: to the middle of the rail, then back to the end it came from.
                         pending = YMIN if target > y else YMAX
-                        target = (YMIN + YMAX) / 2
+                        target = YMID
                         kind = "feint"
                     axis.move(target, a.speed, a.accel)
+                    snarl_until = now + 1.5
                     state["text"] = f"{kind.upper()} to Y{target:.0f}"
                     say(f"{kind}: hand {dist:.0f} mm away, {p[2]:+.0f} mm above rim; Y{y:.0f} to Y{target:.0f}"
                         + (f" then back to Y{pending:.0f}" if kind == "feint" else "")
@@ -454,6 +600,22 @@ def main() -> int:
                     say(hold)
                 last_hold = hold
 
+            # The face: crying while it has given up (horns), snarling during and just after a
+            # dodge or while a hand is in the bowl, watching while a hand is about, else asleep.
+            # The eyes follow the nearest hand along the rail, seen from the face at the rail's
+            # middle.
+            if hands0 or hands1:
+                hand_any = now
+            if face:
+                mood = ("c" if state["stopped"] else "n" if now < snarl_until or path_blocked(low, 0.0, rail.radius)
+                        else "w" if now - hand_any < 2.0 else "s")
+                hand_x = None
+                if current:
+                    rp = rail.to_rail(np.array([tr.palm for tr, _ in current]), y)
+                    near = rp[np.argmin(np.hypot(rp[:, 0], rp[:, 1])), 0]  # along the rail from the bowl
+                    hand_x = (near + (y - YMID) * rail.scale) / 200 * (-1 if a.face_flip else 1)
+                face.set(mood, hand_x, now)
+
             draw(got, now, current, marks, near_pts)
     except KeyboardInterrupt:
         if m:
@@ -464,6 +626,8 @@ def main() -> int:
             d.close()
         for c in cams:
             c.close()
+        if face:
+            face.close()
         if m:
             try:
                 m.send("M400", timeout=10)

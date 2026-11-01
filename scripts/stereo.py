@@ -53,7 +53,8 @@ def find_board(gray: np.ndarray) -> np.ndarray | None:
 class Camera:
     """Reads one webcam in its own thread and keeps only the newest frame and its time."""
 
-    def __init__(self, index: int, exposure: float | None = None, wb: float | None = None) -> None:
+    def __init__(self, index: int, exposure: float | None = None, wb: float | None = None,
+                 gain: float | None = None) -> None:
         self.index = index
         # Open straight into MJPG at the working size. Opening first in the default raw mode takes
         # USB bandwidth the second camera then cannot get.
@@ -77,6 +78,11 @@ class Camera:
         else:
             self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
             self.cap.set(cv2.CAP_PROP_EXPOSURE, exposure)
+        # The two cameras are different models: at the same exposure camera 1 came out half as
+        # bright (mean 65 vs 119, 2026-11-01). Gain 32 on it matched them, still at 30 fps. Camera
+        # 0 has no gain control and ignores it. None leaves whatever the driver remembers.
+        if gain is not None:
+            self.cap.set(cv2.CAP_PROP_GAIN, gain)
         if wb is None:
             self.cap.set(cv2.CAP_PROP_AUTO_WB, 1)
         else:
@@ -115,12 +121,13 @@ class Camera:
         self.cap.release()
 
 
-def open_cameras(indexes: list[int], exposure: float | None) -> list[Camera]:
+def open_cameras(indexes: list[int], exposure: float | None,
+                 gains: list[float] | None = None) -> list[Camera]:
     """Open each camera; if one fails, close the ones already open before raising."""
     cams: list[Camera] = []
     try:
-        for i in indexes:
-            cams.append(Camera(i, exposure))
+        for k, i in enumerate(indexes):
+            cams.append(Camera(i, exposure, gain=gains[k] if gains else None))
     except Exception:
         for c in cams:
             c.close()

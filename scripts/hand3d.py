@@ -16,6 +16,10 @@ the cameras, the hand and its trail, and a graph of hand height over the last fe
 Bed markers are outlined too (magenta when both cameras see one, with its 3D position listed;
 red when only one does), and drawn on the map with the Y rail from bowl_calibrate.py.
 
+Each hand's line also shows its four finger ratios (index, middle, ring, little; about 1.3 is
+straight, under 1 is folded) and HORNS when index and little are up and middle and ring folded,
+to tune is_horns() by eye.
+
 Two hands in view: each hand in camera 0 is matched to the hand in camera 1 whose points
 triangulate with the smallest reprojection error. A large error on every hand usually means
 the cameras swapped numbers after a replug; try --cams 1 0.
@@ -50,6 +54,21 @@ CONNECTIONS = [
     (0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8), (5, 9), (9, 10), (10, 11),
     (11, 12), (9, 13), (13, 14), (14, 15), (15, 16), (13, 17), (0, 17), (17, 18), (18, 19), (19, 20),
 ]
+FINGERS = [(6, 8), (10, 12), (14, 16), (18, 20)]  # middle joint and tip of index, middle, ring, little
+STRAIGHT, FOLDED = 1.15, 0.95  # finger_reach above / below these
+
+
+def finger_reach(pts: np.ndarray) -> np.ndarray:
+    """Per finger (index, middle, ring, little): the tip's distance from the wrist over the middle
+    joint's. About 1.3 for a straight finger, well under 1 for one folded into the palm. A ratio,
+    so it does not care how big the hand is or which way it points."""
+    return np.array([np.linalg.norm(pts[t] - pts[0]) / np.linalg.norm(pts[j] - pts[0]) for j, t in FINGERS])
+
+
+def is_horns(pts: np.ndarray) -> bool:
+    """The horns: index and little finger straight, middle and ring folded. The thumb can do anything."""
+    r = finger_reach(pts)
+    return min(r[0], r[3]) > STRAIGHT and max(r[1], r[2]) < FOLDED
 
 
 def ensure_model() -> None:
@@ -201,11 +220,14 @@ class Map:
     """
 
     def __init__(self, cal: Calibration, span: float, bowl: list[float] | None, seconds: float = 6.0,
-                 max_z: float = 600.0, size: tuple[int, int] = (WIDTH, 420)) -> None:
+                 max_z: float = 600.0, size: tuple[int, int] = (WIDTH, 420),
+                 centre: np.ndarray | None = None) -> None:
         self.w, self.h = size
         self.side = self.h  # the map is square, the graph takes the rest
         self.scale = self.side / (2 * span)
-        self.centre = np.array([(BOARD[0] - 1) * SQUARE_MM / 2, (BOARD[1] - 1) * SQUARE_MM / 2])
+        # Centred on the board by default; give a centre (table mm) to centre on something else.
+        self.centre = (np.array([(BOARD[0] - 1) * SQUARE_MM / 2, (BOARD[1] - 1) * SQUARE_MM / 2])
+                       if centre is None else np.asarray(centre[:2], float))
         self.bowl = np.array(bowl) if bowl else None
         self.seconds, self.max_z = seconds, max_z
         self.cams = [cal.to_table(np.zeros((1, 3)))[0], cal.to_table((-cal.R.T @ cal.T).reshape(1, 3))[0]]
@@ -409,6 +431,9 @@ def main() -> None:
                 if rim is not None:
                     text += (f"   to rim centre {np.linalg.norm(tr.palm[:2] - rim[:2]):.0f} mm,"
                              f" {tr.palm[2] - rim[2]:+.0f} mm above rim")
+                text += "   fingers " + " ".join(f"{r:.2f}" for r in finger_reach(tr.pts))
+                if is_horns(tr.pts):
+                    text += "   HORNS"
                 lines.append((text, tr.colour))
             if rim is not None:
                 lines.append((f"rim: X {rim[0]:.0f}  Y {rim[1]:.0f}  height {rim[2]:.0f} mm", (0, 140, 255)))
