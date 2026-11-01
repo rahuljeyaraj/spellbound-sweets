@@ -365,8 +365,14 @@ def music_box(which: int, seed: int = 11) -> np.ndarray:
             x = tine(midi, total - t + 0.01, strength, rng)
             i = int(t * SR)
             out[i:i + len(x)] += x[:len(out) - i]
-    # A slow wobble in speed, like an old box: done as a gentle delay modulation.
+    # The clockwork inside: a faint whir that ticks with the governor, running down with the tune.
     n = len(out)
+    t = np.arange(n) / SR
+    rate = 11 * (1 - 0.25 * t / total)
+    tick = (0.5 + 0.5 * np.sin(2 * np.pi * np.cumsum(rate) / SR)) ** 6
+    whir = signal.sosfilt(signal.butter(2, (1800, 6000), "bandpass", fs=SR, output="sos"), rng.standard_normal(n))
+    out += whir * tick * 0.012 * np.minimum(1, (total - t) / 0.8).clip(0, 1)
+    # A slow wobble in speed, like an old box: done as a gentle delay modulation.
     wob = 0.0006 * SR * np.sin(2 * np.pi * 0.35 * np.arange(n) / SR)
     out = np.interp(np.arange(n) - wob - wob.max(), np.arange(n), out)
     fade = int(0.35 * SR)
@@ -463,6 +469,8 @@ GROUP_OF = {}  # cue -> group, filled from sound.py's table below
 #   pitch: semitones (down is bigger and slower); max_len, min_len: keep parts this long (s,
 #   after pitching); best: keep the loudest n; gain: dB; fade: fade-out s; lowpass, highpass: Hz
 #   loop: make a seamless loop this many s long (start: where in the recording)
+#   exact: cut (start, end) parts exactly there; otherwise each cut moves to the quietest
+#          moment within 0.25 s, so it does not fall in the middle of a sound
 #   group: the loudness group, when the cue is an alternative not in sound.py's table
 RECIPES = [
     # sleeping: snores pitched down into a bigger creature
@@ -514,23 +522,23 @@ RECIPES = [
     ("whoosh", "whoosh_qubo30", dict(pitch=-5, fade=0.05)),
     ("whoosh", "whoosh_double", dict(fade=0.05)),
     ("whoosh", "whoosh_double", dict(pitch=-3, fade=0.05)),
-    ("whoosh", "whoosh_freqman", dict(parts=[(0.5, 1.25)], fade=0.15)),
-    ("whoosh", "whoosh_benboncan", dict(parts=[(1.3, 2.2)], fade=0.15)),
-    ("scrape", "stone_slide", dict(parts=[(15.0, 15.7), (17.2, 17.9), (20.1, 20.8), (23.0, 23.7)], fade=0.1)),
+    ("whoosh", "whoosh_freqman", dict(exact=True, parts=[(0.5, 1.25)], fade=0.15)),
+    ("whoosh", "whoosh_benboncan", dict(exact=True, parts=[(1.3, 2.2)], fade=0.15)),
+    ("scrape", "stone_slide", dict(exact=True, parts=[(15.0, 15.7), (17.2, 17.9), (20.1, 20.8), (23.0, 23.7)], fade=0.1)),
     ("scrape", "stone_drag", dict(parts=[2, 4], max_len=1.0, fade=0.1)),
     ("grind", "stone_sarcophagus", dict(parts=[0], pitch=-3, fade=0.2)),
-    ("grind", "stone_door", dict(parts=[(2.0, 3.3), (5.0, 6.3), (8.0, 9.3)], pitch=-2, fade=0.2)),
-    ("grind", "stone_blocks", dict(parts=[(3.0, 4.2), (6.5, 7.7)], pitch=-2, fade=0.2)),
+    ("grind", "stone_door", dict(exact=True, parts=[(2.0, 3.3), (5.0, 6.3), (8.0, 9.3)], pitch=-2, fade=0.2)),
+    ("grind", "stone_blocks", dict(exact=True, parts=[(3.0, 4.2), (6.5, 7.7)], pitch=-2, fade=0.2)),
     ("creak", "creak_wood", dict(best=4)),
     ("creak", "creak_mafon", dict(pitch=-3)),
     ("creak", "creak_door_jg", dict(pitch=-2)),
     # the spell: swells (a reversed cymbal peaks at its very end), restart hits
     ("swell", "reverse_glassy", dict(parts=[0], fade=0.01)),
-    ("swell", "reverse_crash", dict(parts=[(6.4, 8.63)], fade=0.01)),
+    ("swell", "reverse_crash", dict(exact=True, parts=[(6.4, 8.63)], fade=0.01)),
     ("restart", "braam_timpani", dict(parts=[0], fade=0.3)),
     ("alt_restart_whoosh", "braam_whoosh1", dict(parts=[0], fade=0.4, group="music")),
     ("alt_restart_whoosh", "braam_whoosh2", dict(parts=[0], fade=0.4, group="music")),
-    ("alt_musicbox_lullaby", "musicbox_lullaby", dict(parts=[(26.5, 32.7)], fade=0.8, group="music")),
+    ("alt_musicbox_lullaby", "musicbox_lullaby", dict(exact=True, parts=[(26.5, 32.7)], fade=0.8, group="music")),
     # background beds: seamless loops of a minute or more
     ("wind", "wind_spooky2", dict(loop=62, start=6.0)),
     ("alt_wind_castle", "wind_castle", dict(loop=70, start=5.0, group="background")),
@@ -546,20 +554,19 @@ RECIPES = [
     ("bats", "bat_fast", dict(parts=[0], fade=0.2)),
     ("bats", "bat_slow", dict(parts=[0], fade=0.4)),
     ("bats", "bats_flying", dict(parts=[(1.4, 6.6), (12.5, 17.7)], fade=0.5)),
-    ("crow", "crow_single", dict(parts=[(0.4, 2.2)], fade=0.3)),
-    ("crow", "crow_craw", dict(parts=[(0.0, 2.6)], fade=0.3)),
-    ("crow", "crow_hooded", dict(parts=[(4.0, 7.3), (15.0, 17.5), (26.7, 29.2)], fade=0.4)),
-    ("crow", "crows_murder", dict(parts=[(4.2, 10.6)], fade=1.0)),
+    ("crow", "crow_single", dict(lowpass=6500, parts=[(0.4, 2.2)], fade=0.3)),
+    ("crow", "crow_craw", dict(lowpass=6500, parts=[(0.0, 2.6)], fade=0.3)),
+    ("crow", "crow_hooded", dict(lowpass=6500, parts=[(4.0, 7.3), (15.0, 17.5), (26.7, 29.2)], fade=0.4)),
+    ("crow", "crows_murder", dict(lowpass=6500, parts=[(4.2, 10.6)], fade=1.0)),
     ("owl", "owl_hoot", dict(parts=[(0.1, 4.3)], fade=0.5)),
     ("owl", "owl_inchadney", dict(min_len=0.9, best=4, fade=0.4)),
     ("owl", "owl_tawny", dict(min_len=1.0, max_len=6, best=3, fade=0.5)),
     ("thunder", "thunder_klang", dict(min_len=3, max_len=12, best=3, fade=1.5)),
     ("thunder", "thunder3", dict(max_len=14, best=1, fade=2.0)),
     ("thunder", "thunder4", dict(max_len=14, best=1, fade=2.0)),
-    ("door", "door_gate", dict(best=1, fade=0.5)),
-    ("door", "door_large", dict(best=1, fade=0.5)),
-    ("door", "door_creak", dict(min_len=1.0, best=2, fade=0.4)),
-    ("chains", "chain_big", dict(min_len=1.0, max_len=4.5, best=4, fade=0.4)),
+    ("door", "door_gate", dict(lowpass=6500, best=1, fade=0.5)),
+    ("door", "door_large", dict(lowpass=6500, best=1, fade=0.5)),
+    ("chains", "chain_big", dict(lowpass=6500, min_len=1.0, max_len=4.5, best=4, fade=0.4)),
 ]
 
 # Takes made from several layers or synthesised (cue, name, function).
@@ -603,6 +610,15 @@ def synth_swell(length: float, seed: int = 2) -> np.ndarray:
     return out / np.abs(out).max()
 
 
+def quietest(x: np.ndarray, t: float, reach: float = 0.25) -> float:
+    """The quietest moment within reach s of t: a better place to cut."""
+    env, h = envelope(x, 0.02, 0.005)
+    a, b = max(0, int((t - reach) * SR / h)), min(len(env), int((t + reach) * SR / h) + 1)
+    if t <= 0.01 or a >= b:
+        return t
+    return (a + int(np.argmin(env[a:b]))) * h / SR
+
+
 def raw_part(name: str, k, seg: dict | None = None) -> np.ndarray:
     """Part k (an index into segments(), or (start, end) s) of a raw download, trimmed."""
     if not (RAW / name / "preview.ogg").exists():
@@ -638,7 +654,7 @@ def build(only: list[str] | None = None) -> list[dict]:
             spans = []
             for p in opt.get("parts", range(len(segs))):
                 if isinstance(p, tuple):
-                    spans.append(p)
+                    spans.append(p if opt.get("exact") else tuple(quietest(x, t) for t in p))
                 elif p < len(segs):
                     spans.append(segs[p][:2])
                 else:

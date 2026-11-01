@@ -869,13 +869,12 @@ class Sound:
         tail = 0.12
         n = int(dur * SR)
         env = np.concatenate([0.15 + 0.85 * speed_curve(dur, axis.speed, axis.accel, dist, n) ** 0.7,
-                              np.linspace(1, 0, int(tail * SR)) * 0.15])
+                              np.linspace(1, 0, int(tail * SR)) * 0.15]).astype(np.float32)
         take = self.mixer.bank.pick("whoosh", self.mixer.rng, near=dur + tail)
         rate = float(np.clip(take.length / (dur + tail), 0.75, 1.35)) if take else 1.0
         size = min(1.0, dist / 200)  # a short hop is a smaller sound
-        self.play("whoosh", t0 - 0.02, env=env.astype(np.float32), rate=rate, take=take,
-                  gain_db=-6 * (1 - size), timed=True)
-        self.play("scrape", t0, env=env.astype(np.float32), gain_db=-6 * (1 - size))
+        self.play("whoosh", t0 - 0.02, env=env, rate=rate, take=take, gain_db=-6 * (1 - size), timed=True)
+        self.play("scrape", t0, env=env, gain_db=-6 * (1 - size))
         if kind in ("dodge", "feint") and t0 < self.cackle_until:
             self.play("hiss", t0 - 0.03, sure=True, gain_db=-6)  # it is laughing: no growl over the laugh
         elif kind in ("dodge", "feint"):
@@ -1021,8 +1020,11 @@ class Live:
         return text
 
     def close(self) -> None:
-        self.stream.stop()
-        self.stream.close()
+        try:
+            self.stream.stop()
+            self.stream.close()
+        except Exception as e:  # the speaker was unplugged: nothing to stop
+            print(f"sound: closing the stream: {e}", flush=True)
         if self.rec_q:
             self.rec_q.put(None)
             self.rec_thread.join(timeout=5)

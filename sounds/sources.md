@@ -24,7 +24,6 @@ the shimmer, the booms, the drone and the swell). Thank you to everyone who shar
 | [A Murder of Crows](https://freesound.org/people/Franki-01234/sounds/214869/) | Franki-01234 | CC0 | crow |
 | [Crying Man](https://freesound.org/people/scottemoil/sounds/263776/) | scottemoil | CC0 | sob |
 | [Man Crying and Whimmering](https://freesound.org/people/qubodup/sounds/200428/) | qubodup | CC BY 4.0 | sob |
-| [DoorCreak.wav](https://freesound.org/people/0XMUSEX0/sounds/168650/) | 0XMUSEX0 | CC0 | door |
 | [horror gate.aif](https://freesound.org/people/Tomlija/sounds/109710/) | Tomlija | CC BY 3.0 | door |
 | [large_creaking_door.wav](https://freesound.org/people/gregswinford/sounds/70101/) | gregswinford | CC BY 4.0 | door |
 | [monster_growl_01.wav](https://freesound.org/people/aesqe/sounds/49127/) | aesqe | CC BY 4.0 | growl |
