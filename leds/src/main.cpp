@@ -170,9 +170,12 @@ void paintMouth(Pic pic, const Ink *inks, int n, float k) {
 
 // ---- the four moods ----
 
+// t is the time since the face fell asleep, so the PC knows where the snore is: each 3 s
+// breath starts dim and shut, and the mouth is open widest 1.5 s in. scripts/sound.py puts
+// the loud part of each snore there.
 void sleeping(float t) {
   // snores with both eyes shut: a blue glow along the bottom of each ring
-  float b = wave(t, 3);
+  float b = 0.5f - 0.5f * cosf(t * 2 * PI / 3);
   for (int e = 0; e < 2; e++)
     for (int k = 6; k <= 10; k++) addRing(e, k, BLUE, .35f + .5f * b);
   finishEyes(1);
@@ -298,7 +301,7 @@ void loop() {
   memset(eyeT, 0, sizeof eyeT);
   memset(mouthT, 0, sizeof mouthT);
   memset(signT, 0, sizeof signT);
-  if (mood == 0) sleeping(t);
+  if (mood == 0) sleeping((frameStart - moodSince) / 1000.0f);
   else if (mood == 1) watching(t);
   else if (mood == 2) snarl(t);
   else crying(t);
