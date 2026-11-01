@@ -1,5 +1,7 @@
 // Face LEDs on one WS2812 chain on D10. The four moods from face/face_preview.html: sleeping
-// (waiting), watching, snarl, crying (gives up).
+// (waiting), watching, snarl, crying (gives up). The same chain goes on to the 8-LED ring under
+// the printed horns hand: it glows white as the hint while the face is awake and fills green
+// when the horns have stopped the game.
 //
 // scripts/dodge.py sets the mood over USB serial, one line at a time: a mood letter, s w n c,
 // then optionally where the hand is, -100 (the face's far left) to 100 (far right), e.g. "w-35".
@@ -10,7 +12,7 @@
 #include <math.h>
 
 const int DATA_PIN = D10;    // GPIO3
-const int N = 160;
+const int N = 168;
 const float BRIGHT = 1.0;    // full, as the preview now starts
 const float LIMIT_MA = 1000; // scale the whole frame down if it would draw more than this
 const float MOOD_S = 5;
@@ -27,12 +29,14 @@ float handX = 0;   // -1 far left to 1 far right, as the face sees it
 //   16-31   left-hand ring, starts at 3 o'clock, runs clockwise
 //   32-95   left mouth board, rows top to bottom, each row left to right
 //   96-159  right mouth board, same
+//   160-167 the ring under the printed horns hand
 // Eye positions k count clockwise from 12 o'clock, as in face/face_preview.html.
 const int RING_N = 16;
 enum Eye { LEFT = 0, RIGHT = 1 };
 const int RING_START[2] = { 16, 0 };    // chain index of each ring's first LED
 const int RING_FIRST_K[2] = { 4, 12 };  // where that first LED sits: 3 o'clock, 9 o'clock
 const int MOUTH_START = 32;
+const int SIGN_START = 160, SIGN_N = 8;
 
 Adafruit_NeoPixel strip(N, DATA_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -98,8 +102,8 @@ void setPx(Pic g, int x, int y, char ch) { if (y >= 0 && y < 8 && x >= 0 && x < 
 
 // ---- targets for this frame, and the colours shown now, eased toward them ----
 
-float eyeT[2][RING_N][3], mouthT[128][3];
-float eyeNow[2][RING_N][3], mouthNow[128][3];
+float eyeT[2][RING_N][3], mouthT[128][3], signT[SIGN_N][3];
+float eyeNow[2][RING_N][3], mouthNow[128][3], signNow[SIGN_N][3];
 
 void addRing(int e, int k, Rgb c, float v) {
   k = ((k % RING_N) + RING_N) % RING_N;
@@ -217,6 +221,29 @@ void crying(float t) {
   paintMouth(g, inks, 3, .9f);
 }
 
+// ---- the ring under the horns hand ----
+
+const Rgb HINT = { 255, 255, 255 }, GREEN = { 0, 255, 40 };
+
+// Off while the face sleeps. Watching, a slow white breath says "this hand"; snarling, it blinks
+// white and red to pull the eye to it. Once the horns have worked it fills green one LED at a
+// time, then stays lit; since is how long ago that began.
+void signRing(int mood, float t, float since) {
+  auto set = [](int i, Rgb c, float v) { signT[i][0] = c.r * v; signT[i][1] = c.g * v; signT[i][2] = c.b * v; };
+  if (mood == 0) return;
+  if (mood == 3) {
+    for (int i = 0; i < SIGN_N; i++) set(i, GREEN, constrain(since * 10 - i, 0, 1));
+    return;
+  }
+  if (mood == 2) {
+    Rgb c = fmodf(t, .5f) < .25f ? HINT : RED;
+    for (int i = 0; i < SIGN_N; i++) set(i, c, 1);
+    return;
+  }
+  float v = .15f + .45f * wave(t, 2.5f);
+  for (int i = 0; i < SIGN_N; i++) set(i, HINT, v);
+}
+
 // ---- main loop ----
 
 void ease(float *now, const float *target, int n, float a) {
@@ -257,6 +284,7 @@ void setup() {
 void loop() {
   static const char *NAMES[4] = { "sleeping", "watching", "snarl", "crying" };
   static int lastMood = -1;
+  static uint32_t moodSince = 0;
   uint32_t frameStart = millis();
   float t = frameStart / 1000.0f;
   rp2040.wdt_reset();
@@ -265,23 +293,27 @@ void loop() {
   if (cmdMood < 0) mood = ((int)(t / MOOD_S)) % 4;   // nothing heard yet: loop them as a test
   else if (millis() - cmdAt > STALE_MS) { mood = 0; hasHand = false; }   // the PC went quiet: sleep
   else mood = cmdMood;
-  if (mood != lastMood) { Serial.printf("%s, up %lu s\n", NAMES[mood], frameStart / 1000); lastMood = mood; }
+  if (mood != lastMood) { Serial.printf("%s, up %lu s\n", NAMES[mood], frameStart / 1000); lastMood = mood; moodSince = frameStart; }
 
   memset(eyeT, 0, sizeof eyeT);
   memset(mouthT, 0, sizeof mouthT);
+  memset(signT, 0, sizeof signT);
   if (mood == 0) sleeping(t);
   else if (mood == 1) watching(t);
   else if (mood == 2) snarl(t);
   else crying(t);
+  signRing(mood, t, (frameStart - moodSince) / 1000.0f);
 
   float a = mood == 2 ? 0.45f : 0.3f;
   ease(&eyeNow[0][0][0], &eyeT[0][0][0], 2 * RING_N * 3, a);
   ease(&mouthNow[0][0], &mouthT[0][0], 128 * 3, a);
+  ease(&signNow[0][0], &signT[0][0], SIGN_N * 3, a);
 
   // about 20 mA per colour at full; scale down if the frame would draw more than the limit
   float sum = 0;
   for (int e = 0; e < 2; e++) for (int k = 0; k < RING_N; k++) for (int c = 0; c < 3; c++) sum += eyeNow[e][k][c];
   for (int i = 0; i < 128; i++) for (int c = 0; c < 3; c++) sum += mouthNow[i][c];
+  for (int i = 0; i < SIGN_N; i++) for (int c = 0; c < 3; c++) sum += signNow[i][c];
   float scale = BRIGHT;
   float ma = sum * scale / 255 * 20;
   if (ma > LIMIT_MA) scale *= LIMIT_MA / ma;
@@ -291,6 +323,7 @@ void loop() {
     for (int k = 0; k < RING_N; k++) strip.setPixelColor(eyeLed((Eye)e, k), out(eyeNow[e][k]));
   for (int y = 0; y < 8; y++)
     for (int x = 0; x < 16; x++) strip.setPixelColor(mouthLed(x, y), out(mouthNow[y * 16 + x]));
+  for (int i = 0; i < SIGN_N; i++) strip.setPixelColor(SIGN_START + i, out(signNow[i]));
   strip.show();
 
   int16_t wait = 16 - (int16_t)(millis() - frameStart);   // about 60 frames a second, like the preview
