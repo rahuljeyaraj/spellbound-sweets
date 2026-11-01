@@ -72,10 +72,11 @@ SOUNDS = {
     "snort": S("snort_*.wav", "voice", -3, 0.5, 1.0, "Sleeping: about one breath in five is a snort instead."),
     "wake": S("wake_*.wav", "voice", -2, 0.5, 1.0, "The face wakes up: a hand has come (sleeping to watching)."),
     "settle": S("settle_*.wav", "voice", -5, 0.5, 1.0, "The face falls asleep again: a sigh or a yawn."),
-    "breath": S("breath_*.wav", "voice", -13, 0.6, 2.0, "Watching: a low breath every few seconds."),
+    "breath": S("breath_*.wav", "voice", -13, 0.6, 2.0,
+                "Watching: a low breath every few seconds, quicker and louder as a hand comes near."),
     "growl": S("growl_*.wav", "voice", 0, 0.8, 1.5, "Every dodge and feint: the main snarl."),
-    "beast": S("beast_*.wav", "voice", -5, 0.8, 2.0, "Under the growl: an animal growl pitched down."),
-    "rumble": S("rumble_*.wav", "voice", -8, 0.5, 2.0, "Under the growl: a deep rumble."),
+    "beast": S("beast_*.wav", "voice", -5, 0.8, 2.0, "Under most growls: an animal growl pitched down.", chance=0.85),
+    "rumble": S("rumble_*.wav", "voice", -8, 0.5, 2.0, "Under most growls: a deep rumble.", chance=0.75),
     "hiss": S("hiss_*.wav", "voice", -6, 0.8, 2.0, "On top of some snarls: a hiss.", chance=0.35),
     "grumble": S("grumble_*.wav", "voice", -6, 0.8, 2.0,
                  "A hand in the bowl, the bowl cornered at the end, or re-homing: small grumbles."),
@@ -108,14 +109,14 @@ SOUNDS = {
 
 # The groups: level dB and how much goes to the shared reverb (0 to 1).
 GROUPS = {
-    "background": (-13.0, 0.10),
+    "background": (-9.0, 0.10),
     "spot": (-11.0, 0.45),
     "hand": (-8.0, 0.35),
     "voice": (-2.0, 0.22),
     "slide": (-6.0, 0.12),
     "music": (-4.0, 0.35),
 }
-MASTER_DB = 4.0  # into the limiter
+MASTER_DB = 6.0  # into the limiter: the demo round comes out near -16 LUFS
 # While a group is sounding, these groups go down by this many dB.
 DUCK = {
     "voice": {"background": 6, "spot": 10, "hand": 3},
@@ -157,7 +158,7 @@ INSTRUMENTS = {
     "theremin": dict(root=57, notes=11, partials=((1, 1.0), (2, 0.10), (3, 0.13), (4, 0.03), (5, 0.04)),
                      bright=0.9, vib=(5.6, 0.22), voices=((0, 1.0),), attack=0.35, release=0.9, glide=0.09),
     "glass": dict(root=69, notes=10, partials=((1, 1.0), (2.0, 0.08), (3.0, 0.05), (4.2, 0.015)),
-                  bright=0.5, vib=(4.0, 0.04), voices=((-4, 0.7), (4, 0.7)), attack=0.6, release=1.4, glide=0.12),
+                  bright=0.5, vib=(4.0, 0.04), voices=((-3, 0.75), (4, 0.3)), attack=0.6, release=1.4, glide=0.12),
     "choir": dict(root=50, notes=11, partials=None, bright=1.0, vib=(5.0, 0.15),
                   voices=((-10, 0.6), (0, 0.7), (9, 0.6)), attack=0.7, release=1.2, glide=0.14),
 }
@@ -371,6 +372,7 @@ class HandTone:
     input is smoothed here as well, per block, so it glides and never steps."""
 
     def __init__(self, voice: str = HAND["voice"]) -> None:
+        self.phases = np.zeros(1)  # each singer's running phase
         self.set_voice(voice)
         self.present = False
         self.height = 0.5  # 0 bottom note, 1 top
@@ -382,14 +384,17 @@ class HandTone:
         self.shiver = 0.0
         self.softness = 1.0
         self.note = None  # scale step being played
+        self.note_age = 0.0  # s since the note last changed
         self.pitch = None  # MIDI, gliding
         self.vib_phase = 0.0
         self.trem_phase = 0.0
-        self.phases = np.zeros(3)
 
     def set_voice(self, voice: str) -> None:
         self.voice, self.ins = voice, INSTRUMENTS[voice]
-        self.phases = np.zeros(len(self.ins["voices"]))
+        if len(self.phases) != len(self.ins["voices"]):
+            self.phases = np.resize(self.phases, len(self.ins["voices"]))
+        self.offsets = np.random.default_rng(1).uniform(0, 2 * np.pi, 48)
+        self.offsets[0] = 0.0
 
     def step_pitch(self, step: int) -> float:
         scale = HAND["scale"]
@@ -410,18 +415,23 @@ class HandTone:
         self.close += (self.close_in - self.close) * a(0.25)
         self.shiver += (self.shiver_in - self.shiver) * a(0.15)
         self.softness += ((db(HAND["crying_db"]) if self.soft else 1.0) - self.softness) * a(0.5)
-        # The note: the nearest scale step, changed only once the hand is clearly nearer another.
+        # The note: the nearest scale step, changed only once the hand is clearly nearer another
+        # (well past the halfway point), and held at least a moment, so a hand held still does
+        # not flicker between two notes.
         x = self.height * (ins["notes"] - 1)
-        if self.note is None or abs(x - self.note) > 0.65:
+        self.note_age += dt
+        if self.note is None or (abs(x - self.note) > 0.8 and self.note_age > 0.12):
             self.note = int(round(x))
+            self.note_age = 0.0
         p_target = self.step_pitch(self.note)
         p0 = p_target if self.pitch is None else self.pitch
         p1 = p0 + (p_target - p0) * a(ins["glide"])
         self.pitch = p1
-        # Vibrato and tremolo grow with the shiver (a fast hand).
+        # Vibrato blooms once a note has settled, as a singer's does, and grows with the shiver
+        # (a fast hand), as does a tremolo.
         vrate, vdepth = ins["vib"]
         vrate *= 1 + 0.35 * self.shiver
-        vdepth = vdepth + 0.45 * self.shiver
+        vdepth = vdepth * min(1.0, 0.35 + self.note_age / 0.4) + 0.45 * self.shiver
         vib = vdepth * np.sin(self.vib_phase + 2 * np.pi * vrate * AR / SR)
         self.vib_phase = (self.vib_phase + 2 * np.pi * vrate * dt) % (2 * np.pi)
         midi = p0 + (p1 - p0) * AR / BLOCK + vib
@@ -445,12 +455,16 @@ class HandTone:
             amps = np.array([g for _, g in ins["partials"]], float) * bright ** np.arange(len(ratios))
         keep = ratios * mean_f < 9000
         ratios, amps = ratios[keep], amps[keep]
-        amps = amps / amps.sum()
+        # Same loudness for every voice: scale by the partials' power, not their sum (a choir's
+        # many harmonics would otherwise come out much quieter than a near-sine). Fixed random
+        # starting phases keep the peaks down.
+        amps = amps / np.sqrt(np.sum(amps ** 2)) * 0.5
+        offs = self.offsets[:len(ratios)]
         tone = np.zeros(BLOCK)
         for v, (cents, vlevel) in enumerate(ins["voices"]):
             ph = self.phases[v] + 2 * np.pi * np.cumsum(f0 * 2 ** (cents / 1200)) / SR
             self.phases[v] = ph[-1]
-            tone += vlevel * (amps[:, None] * np.sin(ratios[:, None] * ph[None, :])).sum(axis=0)
+            tone += vlevel * (amps[:, None] * np.sin(ratios[:, None] * ph[None, :] + offs[:, None])).sum(axis=0)
         tone /= sum(vl for _, vl in ins["voices"])
         out += (tone * env).astype(np.float32)[:, None]
 
@@ -544,23 +558,26 @@ class Mixer:
         self._patterns(end)
 
         buses = {g: np.zeros((BLOCK, 2), np.float32) for g in GROUPS}
+        breaths = np.zeros((BLOCK, 2), np.float32)  # the mood's own snores, breaths and sobs
         for v in self.voices:
-            start = getattr(v, "start", 0)
-            v.start = 0
-            v.mix(buses[v.group], start)
+            start, v.start = v.start, 0
+            v.mix(breaths if v.group == "voice" and v.tag == "mood" else buses[v.group], start)
         self.voices = [v for v in self.voices if not v.done]
         self.hand.render(buses["hand"])
         if self.wind:  # the wind rises with a hand near the bowl, and settles when it goes
             self.wind.gain = db(self.bank.sounds["wind"].db + HAND["wind_db"] * self.hand.close * min(self.hand.amp, 1))
 
         # How much each group sounds (for ducking): its level, -50 dBFS = 0 to -30 = 1, quick
-        # to rise and slow to fall.
+        # to rise and slow to fall. For the voice only its reactions count (growls, laughs,
+        # grunts): the background ducks under those, not under every snore, and the spot sounds
+        # wait for them, not for the breathing.
         for g, b in buses.items():
             level = 10 * math.log10(float(np.mean(b * b)) + 1e-12)
             x = min(max((level + 50) / 20, 0.0), 1.0)
             self.act[g] += (x - self.act[g]) * (0.3 if x > self.act[g] else 0.018)
         if self.act["voice"] > 0.12:
             self.voice_heard = end
+        buses["voice"] += breaths
         dry = np.zeros((BLOCK, 2), np.float32)
         send = np.zeros(BLOCK, np.float32)
         for g, b in buses.items():
@@ -589,6 +606,8 @@ class Mixer:
             return None
         rate *= 2 ** (self.rng.uniform(-s.pitch, s.pitch) / 12)
         gain = db(s.db + gain_db + self.rng.uniform(-s.vary, s.vary))
+        if skip > 0:  # started part-way through: fade in so it does not click
+            fade_in = max(fade_in, 0.005)
         v = Voice(take, s.group, gain, rate, pan, s.loop, tag, env, fade_in, skip)
         v.start = max(0, min(offset, BLOCK - 1))
         self.voices.append(v)
@@ -686,9 +705,10 @@ class Mixer:
                 self.snore_k += 1
         elif self.next_at is not None and self.next_at < end:
             offset = max(0, self.next_at - self.n)
-            if self.mood == "w":
-                self._start("breath", offset, tag="mood")
-                self.next_at += int(r(*TIMING["breath_gap"]) * SR)
+            if self.mood == "w":  # breathing quickens and grows as a hand comes near the bowl
+                near = self.hand.close * min(self.hand.amp, 1)
+                self._start("breath", offset, gain_db=5 * near, tag="mood")
+                self.next_at += int(r(*TIMING["breath_gap"]) * (1 - 0.45 * near) * SR)
             elif self.mood == "n":
                 if self.voice_busy():
                     self.next_at = end + int(0.25 * SR)
@@ -756,7 +776,7 @@ class Sound:
         self.mixer, self.live = mixer, live
         self.mood = ""
         self.mood_since = 0.0
-        self.f_height, self.f_dist = OneEuro(), OneEuro(0.6)
+        self.f_height, self.f_dist = OneEuro(0.5, 0.006), OneEuro(0.6)
         self.last_p: np.ndarray | None = None
         self.last_t = 0.0
         self.speed = 0.0
@@ -1184,9 +1204,11 @@ def write(path: Path, audio: np.ndarray) -> None:
 
 # ---- the try-it pad ----
 
-def pad(device: str | None, volume: float, seconds: float | None) -> None:
+def pad(device: str | None, volume: float, seconds: float | None, test_keys: str = "") -> None:
     """A window where the mouse is the hand: across is along the rail (the bowl in the middle),
-    up and down is height above the rim. Number keys fire the reactions. Real speaker."""
+    up and down is height above the rim. Number keys fire the reactions. Real speaker.
+    test_keys: press these keys by itself, one a second, with a pretend mouse going round in
+    circles (to test it with nobody there)."""
     import cv2
     snd = Sound.open("auto", device, volume)
     if snd is None:
@@ -1211,6 +1233,10 @@ def pad(device: str | None, volume: float, seconds: float | None) -> None:
         while seconds is None or time.monotonic() - t_start < seconds:
             now = time.monotonic()
             palms = None
+            if test_keys:
+                a = (now - t_start) * 1.3
+                state["mouse"] = (int(W / 2 + 300 * math.cos(a)), int(H / 2 + 180 * math.sin(a)))
+                state["inside"] = True
             if state["inside"] and state["mouse"]:
                 x, y = state["mouse"]
                 along = (x - W / 2) / (W / 2) * 450
@@ -1219,6 +1245,10 @@ def pad(device: str | None, volume: float, seconds: float | None) -> None:
                 st["hand_any"] = now
             key = cv2.waitKey(15) & 0xFF
             k = chr(key) if key < 255 else ""
+            second = int(now - t_start) - 1
+            if test_keys and 0 <= second < len(test_keys) and second not in state.setdefault("pressed", set()):
+                state["pressed"].add(second)
+                k = test_keys[second]
             if key in (ord("q"), 27):
                 break
             what = keys.get(k)
@@ -1296,6 +1326,7 @@ def main() -> int:
     ap.add_argument("--sound-device", help="output device: number or part of its name (default: the USB speaker)")
     ap.add_argument("--volume", type=float, help="0 to 1 (default 1; 0 for --check)")
     ap.add_argument("--seconds", type=float, help="--pad: quit by itself after this long")
+    ap.add_argument("--test-keys", default="", help="--pad: press these keys by itself, one a second")
     a = ap.parse_args()
     if a.devices:
         import sounddevice as sd
@@ -1327,7 +1358,7 @@ def main() -> int:
         snd.close()
         return 0
     if a.pad:
-        pad(a.sound_device, 1.0 if a.volume is None else a.volume, a.seconds)
+        pad(a.sound_device, 1.0 if a.volume is None else a.volume, a.seconds, a.test_keys)
         return 0
     ap.print_help()
     return 0
