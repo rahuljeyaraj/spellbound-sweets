@@ -249,7 +249,12 @@ class Voice:
         self.fade_to = 1.0
         self.fade_step = 1.0 / (fade_in * SR) if fade_in > 0 else 0.0
         self.start = 0  # where in the next block it begins
+        self.name = ""  # which sound it is
         self.done = False
+
+    def left(self) -> float:
+        """s still to play (a loop: for ever)."""
+        return math.inf if self.loop else (self.n - self.pos) / (self.rate * SR)
 
     def stop(self, seconds: float) -> None:
         self.fade_to = 0.0
@@ -615,6 +620,7 @@ class Mixer:
             fade_in = max(fade_in, 0.005)
         v = Voice(take, s.group, gain, rate, pan, s.loop, tag, env, fade_in, skip)
         v.start = max(0, min(offset, BLOCK - 1))
+        v.name = name
         self.voices.append(v)
         if self.log is not None:
             self.log.append(((self.n + v.start) / SR, name, take.path.stem, round(rate, 3)))
@@ -629,8 +635,9 @@ class Mixer:
                     self.wind = v
 
     def voice_busy(self) -> bool:
-        """Is the skull saying something (not counting its mood's breaths and sobs)?"""
-        return any(v.group == "voice" and v.tag != "mood" for v in self.voices)
+        """Is the skull saying something (not counting its mood's breaths and sobs, nor the
+        last 0.4 s of a sound tailing off)?"""
+        return any(v.group == "voice" and v.tag != "mood" and not v.done and v.left() > 0.4 for v in self.voices)
 
     def _do(self, c: Cmd, offset: int) -> None:
         kw = c.kw
@@ -644,6 +651,12 @@ class Mixer:
             s = self.bank.sounds[kw["name"]]
             if s.chance < 1 and not kw.get("sure") and self.rng.random() > s.chance:
                 return
+            laughing = any(v.name == "cackle" and not v.done and v.fade_to > 0 for v in self.voices)
+            if laughing and kw["name"] in ("growl", "beast", "rumble", "cackle"):
+                return  # it is laughing: no growl over the laugh, and not a second laugh
+            for v in self.voices:  # sounds this one takes over from fade out quickly
+                if v.name in kw.get("over", ()):
+                    v.stop(0.25)
             skip = 0.0
             if kw.get("keep_end") and c.when is not None:
                 # Asked for a time already past (a short --resume): start that far into it, so
@@ -793,7 +806,7 @@ class Sound:
         self.in_bowl_since_move = False
         self.cackle_due: tuple[float, float] | None = None  # (when, chance) after a dodge
         self.grumbled = -1e9
-        self.last_move = self.last_snarl = self.cackle_until = -1e9
+        self.last_move = self.last_snarl = -1e9
 
     @classmethod
     def open(cls, how: str = "auto", device: str | None = None, volume: float = 1.0,
@@ -837,12 +850,12 @@ class Sound:
                 self.play("grumble", now)  # a hand got into the bowl without a dodge
         if in_bowl:
             self.in_bowl_since_move = True
+        if mood == "c":
+            self.cackle_due = None  # it has lost: no laughing
         if self.cackle_due and now >= self.cackle_due[0]:
             if not self.in_bowl_since_move and self.rng.random() < self.cackle_due[1]:
-                take = self.mixer.bank.pick("cackle", self.rng)
-                if take:
-                    self.play("cackle", now, take=take, wait_voice=1.2)
-                    self.cackle_until = now + 0.5 + take.length
+                # It laughs at once; the growl still going gives way to it.
+                self.play("cackle", now, over=("growl", "beast", "rumble", "grumble", "hiss"), tag="laugh")
             self.cackle_due = None
 
         if palms is not None and len(palms):
@@ -885,9 +898,7 @@ class Sound:
         size = min(1.0, dist / 200)  # a short hop is a smaller sound
         self.play("whoosh", t0 - 0.02, env=env, rate=rate, take=take, gain_db=-6 * (1 - size), timed=True)
         self.play("scrape", t0, env=env, gain_db=-6 * (1 - size))
-        if kind in ("dodge", "feint") and t0 < self.cackle_until:
-            self.play("hiss", t0 - 0.03, sure=True, gain_db=-6)  # it is laughing: no growl over the laugh
-        elif kind in ("dodge", "feint"):
+        if kind in ("dodge", "feint"):
             if t0 - self.last_snarl >= TIMING["snarl_gap"]:
                 # The snarl, in layers a few ms apart so they do not sound like one file.
                 rng = self.rng
@@ -900,13 +911,14 @@ class Sound:
         if kind in ("dodge", "feint"):
             self.in_bowl_since_move = False
             self.last_move = t0
-        if kind in ("dodge", "back"):
-            # The laugh comes once the hand stops chasing: another dodge first only puts it off
-            # (keeping a feint's better odds).
-            chance = SOUNDS["cackle"].chance * (0.25 if kind == "dodge" else 0.6)
+        if kind in ("dodge", "feint", "back"):
+            # The laugh comes once the hand stops chasing: another move first only puts it off,
+            # keeping the better odds (a feint's return is the best).
+            chance = SOUNDS["cackle"].chance * {"dodge": 0.25, "feint": 0.0, "back": 0.6}[kind]
             if self.cackle_due:
                 chance = max(chance, self.cackle_due[1])
-            self.cackle_due = (t0 + dur + TIMING["cackle_after"], chance)
+            if chance > 0:
+                self.cackle_due = (t0 + dur + TIMING["cackle_after"], chance)
 
     def event(self, name: str, at: float | None = None) -> None:
         """horns (the horns stopped the game), free (at: when the 10 s to take a sweet end),
@@ -914,7 +926,9 @@ class Sound:
         now = at if name != "free" else None
         if name == "horns":
             self.post("cancel", tag="countdown")
+            self.post("cancel", tag="laugh", fade=0.4)  # it has lost: no laughing
             self.play("spell")
+            self.cackle_due = None
         elif name == "free" and at is not None:
             box = self.mixer.bank.pick("musicbox", self.rng)
             if box:
@@ -1192,7 +1206,7 @@ def demo_round(t_offset: float = 0.0):
         elif not moving and rp is not None and 0 <= rp[2] < 250 and reaching and not in_bowl:
             target = YMIN if axis.y(T) > YMID else YMAX
             kind = "dodge"
-            if now > 36 and st["feints"] == 0:  # one feint: to the middle and straight back
+            if now > 34.6 and st["feints"] == 0:  # one feint, just before the hand pulls back: to the middle and straight back
                 st["feints"] += 1
                 kind, st["pending"], target = "feint", axis.y(T), YMID
             axis.move(target, 700, 7000, T)
