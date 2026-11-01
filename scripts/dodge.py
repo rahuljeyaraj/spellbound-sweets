@@ -50,6 +50,11 @@ feint and while a hand is in the bowl, and cries while the horns have stopped th
 eyes follow the hand nearest the bowl along the rail, from the rail's middle; --face-flip if
 they look the wrong way. If dodge.py stops sending, the face falls asleep after 2 s.
 
+Sound (scripts/sound.py) plays on the USB speaker (--sound none for none): a tone that follows
+the hand, the skull's voice for each mood, a whoosh fitted to every move, the spell sting, the
+music box over the last seconds of the --resume time, and the night around it. --sound-record
+writes what it plays to a WAV.
+
 Keys: q quit, h re-home, d dodging on or off (and ends a horns stop).
 """
 
@@ -67,6 +72,7 @@ from serial.tools import list_ports
 from bowl_calibrate import BOWL_FILE, draw_markers, match_markers
 from hand3d import Detector, Map, Tracker, draw_hand, ensure_model, is_horns, match_hands
 from rim_calibrate import RIM_FILE, rail_frame
+from sound import Sound
 from stereo import CALIB_FILE, HEIGHT, WIDTH, Calibration, open_cameras, wait_for_frames
 from y_speed import y_switch_triggered
 from y_sweep import Marlin
@@ -255,6 +261,10 @@ def main() -> int:
     ap.add_argument("--slide-accel", type=float, default=1000, help="acceleration of that slide, mm/s^2")
     ap.add_argument("--face", default="auto", help="the LED face's serial port; auto finds it, none for no face")
     ap.add_argument("--face-flip", action="store_true", help="the eyes look the wrong way: mirror them")
+    ap.add_argument("--sound", default="auto", help="auto plays on the USB speaker, none for no sound")
+    ap.add_argument("--sound-device", help="the speaker: device number or part of its name (sound.py --devices)")
+    ap.add_argument("--volume", type=float, default=1.0, help="sound volume, 0 to 1")
+    ap.add_argument("--sound-record", metavar="WAV", help="also write everything the sound plays to this file")
     ap.add_argument("--slip", type=float, default=6.0, help="marker vs axis difference that means lost steps, mm")
     ap.add_argument("--max-err", type=float, default=20.0, help="reject hand pairs above this px error")
     ap.add_argument("--spread", action="store_true", help="Y driver in spreadCycle: louder, more torque at speed")
@@ -279,7 +289,9 @@ def main() -> int:
     face_port = None if a.face == "none" else find_face() if a.face == "auto" else a.face
     face = Face(face_port) if face_port else None
     print(f"face on {face_port}" if face else "no face", flush=True)
+    snd = Sound.open(a.sound, a.sound_device, a.volume, a.sound_record)
     cams, dets = [], []
+    frames, run_t0 = 0, time.monotonic()
     seen_by = {k: 0 for k in ("both", "cam0 only", "cam1 only", "rejected", "none")}  # frames, for the end
     cv2.namedWindow("dodge", cv2.WINDOW_NORMAL)  # resizable, to fit the screen
     cv2.resizeWindow("dodge", WIDTH * 3 // 4, (70 + HEIGHT // 2 + 420) * 3 // 4)
@@ -441,6 +453,8 @@ def main() -> int:
             cleared first, so anchor() puts it back if the printer is still out of place."""
             state["text"] = text
             state["banner"] = None
+            if snd and text == "re-homing":  # not the first home at start-up
+                snd.event("rehome")
             home(m, idle_show)
             anchor(YMIN)
             return Axis(m, YMIN)
@@ -454,6 +468,9 @@ def main() -> int:
             axis = rehome("homing Y")
         say(f"ready: dodge at {a.speed:g} mm/s, {a.accel:g} mm/s2, trigger {a.trigger:g} mm")
         state["text"] = "watching"
+        if snd:
+            snd.ready(time.monotonic())
+        run_t0 = time.monotonic()
 
         while True:
             got = frame_view()
@@ -464,6 +481,8 @@ def main() -> int:
                 if state["stopped"]:
                     state["stopped"] = False
                     state["enabled"] = True
+                    if snd:
+                        snd.event("again")
                 else:
                     state["enabled"] = not state["enabled"]
                 say("dodging " + ("on" if state["enabled"] else "off"))
@@ -475,6 +494,7 @@ def main() -> int:
             if got is None:
                 continue
             now = time.monotonic()
+            frames += 1
             (f0, s0, hands0, mk0), (f1, s1, hands1, mk1) = got[0][0], got[1][0]
             found = match_hands(cal, hands0, hands1, a.max_err)
             current = tracker.update(now, found)
@@ -540,9 +560,13 @@ def main() -> int:
                 free_until = None
                 pending = None
                 say("horns: stopped, sliding to the middle")
+                if snd:
+                    snd.event("horns")
             elif state["stopped"] and free_until is not None and now > free_until:
                 state["stopped"] = False
                 say(f"{a.resume:g} s up: dodging again")
+                if snd:
+                    snd.event("again")
 
             if m is None and not dry_placed and rail.base_id in marks:
                 # Dry run: start the pretend axis where the bowl really is.
@@ -597,12 +621,16 @@ def main() -> int:
                         if free_until is None:
                             free_until = now + a.resume
                             say(f"in the middle: {a.resume:g} s to take a sweet")
+                            if snd:
+                                snd.event("free", free_until)  # the music box ends with the time
                         state["text"] = f"STOPPED (horns): take a sweet! Dodging again in {np.ceil(free_until - now):.0f} s"
                 elif path_blocked(low, (YMID - y) * rail.scale, rail.radius):
                     hold = "holding: hand below the rim in the way to the middle"
                 elif not state["banner"]:
                     axis.move(YMID, a.slide, a.slide_accel)
                     state["text"] = f"HORNS: sliding to Y{YMID:.0f}"
+                    if snd:
+                        snd.move("slide", axis)
             elif pending is not None and not moving:
                 # Second half of a feint: dart back, even onto a hand waiting there (the bowl dodges
                 # it again at once), unless a low hand is now in the way. Called off, the bowl is
@@ -614,6 +642,8 @@ def main() -> int:
                     snarl_until = now + 1.5
                     state["text"] = f"FEINT back to Y{pending:.0f}"
                     moving = True
+                    if snd:
+                        snd.move("back", axis)
                 pending = None
             elif (reaching or between) and not moving and state["enabled"] and not state["banner"]:
                 p = min(reach, key=lambda q: np.hypot(q[0], q[1])) if reach else None
@@ -621,12 +651,16 @@ def main() -> int:
                           else YMIN if y - YMIN < YMAX - y else YMAX)
                 if abs(target - y) <= 5:
                     hold = "holding: cornered at the end of the rail"
+                    if snd and hold != last_hold:
+                        snd.event("cornered")
                 elif path_blocked(low, (target - y) * rail.scale, rail.radius):
                     hold = "holding: hand below the rim in the bowl's path"
                 elif not reaching:
                     axis.move(target, a.speed, a.accel)
                     state["text"] = f"ON TO Y{target:.0f}"
                     say(f"on to an end: stopped at Y{y:.0f}, going to Y{target:.0f}")
+                    if snd:
+                        snd.move("on", axis)
                 else:
                     seen_at = max(s0, s1)  # when the newer of the two frames was taken
                     kind = "dodge"
@@ -638,6 +672,8 @@ def main() -> int:
                     axis.move(target, a.speed, a.accel)
                     snarl_until = now + 1.5
                     state["text"] = f"{kind.upper()} to Y{target:.0f}"
+                    if snd:
+                        snd.move(kind, axis)
                     say(f"{kind}: hand {dist:.0f} mm away, {p[2]:+.0f} mm above rim; Y{y:.0f} to Y{target:.0f}"
                         + (f" then back to Y{pending:.0f}" if kind == "feint" else "")
                         + f"; frame to command {1000 * (time.monotonic() - seen_at):.0f} ms")
@@ -653,18 +689,21 @@ def main() -> int:
             # The face: crying while it has given up (horns), snarling during and just after a
             # dodge or while a hand is in the bowl, watching while a hand is about, else asleep.
             # The eyes follow the nearest hand along the rail, seen from the face at the rail's
-            # middle.
+            # middle. The sound gets the same mood and the palms.
             if hands0 or hands1:
                 hand_any = now
+            in_bowl = path_blocked(low, 0.0, rail.radius)
+            mood = ("c" if state["stopped"] else "n" if now < snarl_until or in_bowl
+                    else "w" if now - hand_any < 2.0 else "s")
+            palms = rail.to_rail(np.array([tr.palm for tr, _ in current]), y) if current else None
             if face:
-                mood = ("c" if state["stopped"] else "n" if now < snarl_until or path_blocked(low, 0.0, rail.radius)
-                        else "w" if now - hand_any < 2.0 else "s")
                 hand_x = None
-                if current:
-                    rp = rail.to_rail(np.array([tr.palm for tr, _ in current]), y)
-                    near = rp[np.argmin(np.hypot(rp[:, 0], rp[:, 1])), 0]  # along the rail from the bowl
+                if palms is not None:
+                    near = palms[np.argmin(np.hypot(palms[:, 0], palms[:, 1])), 0]  # along the rail from the bowl
                     hand_x = (near + (y - YMID) * rail.scale) / 200 * (-1 if a.face_flip else 1)
                 face.set(mood, hand_x, now)
+            if snd:
+                snd.frame(now, mood, palms, in_bowl)
 
             draw(got, now, current, marks, near_pts)
     except KeyboardInterrupt:
@@ -676,6 +715,11 @@ def main() -> int:
         if total:
             print("frames with a hand: " + ", ".join(f"{k} {100 * n / total:.0f}%"
                                                      for k, n in seen_by.items() if k != "none"), flush=True)
+        if frames:
+            secs = time.monotonic() - run_t0
+            print(f"{frames} frames in {secs:.0f} s: {frames / secs:.1f} a second", flush=True)
+        if snd:
+            snd.close()
         for d in dets:
             d.close()
         for c in cams:

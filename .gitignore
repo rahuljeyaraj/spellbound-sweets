@@ -7,3 +7,7 @@ calib/
 .claude/settings.local.json
 # Pictures saved by dodge.py --misses; they show the kids
 runs/
+# The sound set: big, rebuilt by scripts/make_sounds.py. Only the credits and the listening page are kept.
+sounds/*
+!sounds/sources.md
+!sounds/preview.html
