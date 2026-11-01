@@ -8,6 +8,7 @@ Run after scripts/make_sounds.py. Prints PASS or FAIL for each:
   loop's own ordinary steps (no clicks)
 - the demo round, after the limiter, never above -1 dBFS, also between samples (true peak)
 - every whoosh starts with its move, and every snore's loudest moment falls on the mouth's
+- the skull never laughs while crying, and no growl starts over a laugh
 - a hand held still on a noisy camera keeps its note
 - mixing is fast enough: well over real time
 """
@@ -87,6 +88,18 @@ def main() -> int:
     gaps = [min(abs(s - (m + sound.FakeAxis.LAG)) for s in starts) for m in moves]
     check(max(gaps) < 0.03, f"{len(moves)} moves each have a whoosh or grind starting with the bed "
                             f"(worst {1000 * max(gaps):.0f} ms off)")
+
+    # The laugh: never while it cries (from the horns to the restart's own laugh), and no growl
+    # starts on top of one.
+    horns = next(t for t, text in timeline if text.startswith("the horns"))
+    again = next(t for t, text in timeline if text.startswith("10 s up"))
+    lengths = {t.path.stem: t.length for t in bank.takes["cackle"]}
+    laughs = [(t, t + lengths[stem]) for t, name, stem, _ in log if name == "cackle"]
+    crying = [round(a, 2) for a, _ in laughs if horns <= a < again - 0.01]
+    over = [round(t, 2) for t, name, _, _ in log if name in ("growl", "beast", "rumble")
+            and any(a <= t < b for a, b in laughs)]
+    check(not crying and not over, f"{len(laughs)} laughs: none while crying{' (' + str(crying) + ')' if crying else ''}, "
+                                   f"no growl over one{' (' + str(over) + ')' if over else ''}")
 
     # Snores: loudest moment on the mouth's widest, every 3 s from falling asleep.
     mixer = sound.Mixer(sound.Bank(keep={"snore", "snort"}), seed=2)
