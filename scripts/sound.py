@@ -192,9 +192,14 @@ def load(path: Path, loop: bool) -> Take:
     if sr != SR:
         g = math.gcd(SR, sr)
         x = signal.resample_poly(x, SR // g, sr // g).astype(np.float32)
-    env = np.convolve(np.abs(x), np.ones(2400) / 2400, mode="same") if len(x) > 2400 else np.abs(x)
+    w = 2400  # the loudest 50 ms, by a running sum (a minute-long bed loads in a moment)
+    if len(x) > w:
+        c = np.concatenate([[0.0], np.cumsum(np.abs(x), dtype=np.float64)])
+        peak = (int(np.argmax(c[w:] - c[:-w])) + w // 2) / SR
+    else:
+        peak = float(np.argmax(np.abs(x))) / SR
     data = np.concatenate([x, x[:1] if loop else np.zeros(1, np.float32)]).astype(np.float32)
-    return Take(data, float(np.argmax(env)) / SR, path)
+    return Take(data, peak, path)
 
 
 class Bank:
@@ -639,8 +644,13 @@ class Mixer:
             s = self.bank.sounds[kw["name"]]
             if s.chance < 1 and not kw.get("sure") and self.rng.random() > s.chance:
                 return
+            skip = 0.0
+            if kw.get("keep_end") and c.when is not None:
+                # Asked for a time already past (a short --resume): start that far into it, so
+                # it still ends when it should.
+                skip = max(0.0, self.t_first + offset / SR - c.when)
             v = self._start(kw["name"], offset, kw.get("gain_db", 0.0), kw.get("rate", 1.0), kw.get("pan", 0.0),
-                            kw.get("tag", ""), kw.get("env"), kw.get("fade_in", 0.0), take=kw.get("take"))
+                            kw.get("tag", ""), kw.get("env"), kw.get("fade_in", 0.0), take=kw.get("take"), skip=skip)
             if v and kw.get("timed"):
                 heard = self.t_first + v.start / SR
                 self.late.append((heard - c.posted, heard - (c.posted if c.when is None else c.when)))
@@ -659,8 +669,6 @@ class Mixer:
         elif c.kind == "hand":
             h = self.hand
             h.present, h.height, h.close_in, h.shiver_in = kw["present"], kw["height"], kw["close"], kw["shiver"]
-            if self.wind:
-                self.wind.gain = db(self.bank.sounds["wind"].db + HAND["wind_db"] * h.close)
         elif c.kind == "voice":
             self.hand.set_voice(kw["voice"])
 
@@ -774,6 +782,7 @@ class Sound:
 
     def __init__(self, mixer: Mixer, live: "Live | None" = None) -> None:
         self.mixer, self.live = mixer, live
+        self.rng = np.random.default_rng(int(mixer.rng.integers(1 << 32)))  # its own: it runs on dodge.py's thread
         self.mood = ""
         self.mood_since = 0.0
         self.f_height, self.f_dist = OneEuro(0.5, 0.006), OneEuro(0.6)
@@ -829,8 +838,8 @@ class Sound:
         if in_bowl:
             self.in_bowl_since_move = True
         if self.cackle_due and now >= self.cackle_due[0]:
-            if not self.in_bowl_since_move and self.mixer.rng.random() < self.cackle_due[1]:
-                take = self.mixer.bank.pick("cackle", self.mixer.rng)
+            if not self.in_bowl_since_move and self.rng.random() < self.cackle_due[1]:
+                take = self.mixer.bank.pick("cackle", self.rng)
                 if take:
                     self.play("cackle", now, take=take, wait_voice=1.2)
                     self.cackle_until = now + 0.5 + take.length
@@ -862,7 +871,7 @@ class Sound:
         if kind == "slide":
             env = np.concatenate([speed_curve(dur, axis.speed, axis.accel, dist, int(dur * SR)) ** 0.5,
                                   np.linspace(1, 0, int(0.25 * SR)) ** 2])
-            take = self.mixer.bank.pick("grind", self.mixer.rng, near=dur + 0.25)
+            take = self.mixer.bank.pick("grind", self.rng, near=dur + 0.25)
             rate = float(np.clip(take.length / (dur + 0.25), 0.8, 1.25)) if take else 1.0
             self.play("grind", t0, env=env.astype(np.float32), rate=rate, take=take, timed=True)
             self.play("creak", t0 + dur - 0.1)
@@ -871,7 +880,7 @@ class Sound:
         n = int(dur * SR)
         env = np.concatenate([0.15 + 0.85 * speed_curve(dur, axis.speed, axis.accel, dist, n) ** 0.7,
                               np.linspace(1, 0, int(tail * SR)) * 0.15]).astype(np.float32)
-        take = self.mixer.bank.pick("whoosh", self.mixer.rng, near=dur + tail)
+        take = self.mixer.bank.pick("whoosh", self.rng, near=dur + tail)
         rate = float(np.clip(take.length / (dur + tail), 0.75, 1.35)) if take else 1.0
         size = min(1.0, dist / 200)  # a short hop is a smaller sound
         self.play("whoosh", t0 - 0.02, env=env, rate=rate, take=take, gain_db=-6 * (1 - size), timed=True)
@@ -881,7 +890,7 @@ class Sound:
         elif kind in ("dodge", "feint"):
             if t0 - self.last_snarl >= TIMING["snarl_gap"]:
                 # The snarl, in layers a few ms apart so they do not sound like one file.
-                rng = self.mixer.rng
+                rng = self.rng
                 for layer, lead in (("growl", 0.03), ("beast", rng.uniform(0, 0.04)), ("rumble", 0.05),
                                     ("hiss", rng.uniform(-0.15, -0.05))):
                     self.play(layer, t0 - lead)
@@ -907,14 +916,14 @@ class Sound:
             self.post("cancel", tag="countdown")
             self.play("spell")
         elif name == "free" and at is not None:
-            box = self.mixer.bank.pick("musicbox", self.mixer.rng)
+            box = self.mixer.bank.pick("musicbox", self.rng)
             if box:
                 land = at - TIMING["music_land"]
                 # The music box's last note is 1.2 s before its end (make_sounds.py makes it so).
-                self.play("musicbox", land - (box.length - 1.2), take=box, tag="countdown")
-            swell = self.mixer.bank.pick("swell", self.mixer.rng)
+                self.play("musicbox", land - (box.length - 1.2), take=box, tag="countdown", keep_end=True)
+            swell = self.mixer.bank.pick("swell", self.rng)
             if swell:
-                self.play("swell", at - swell.peak, take=swell, tag="countdown")
+                self.play("swell", at - swell.peak, take=swell, tag="countdown", keep_end=True)
         elif name == "again":
             self.post("cancel", tag="countdown", fade=0.6)
             self.play("restart", now)
