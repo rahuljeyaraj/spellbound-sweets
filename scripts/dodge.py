@@ -33,10 +33,11 @@ Hand points below the rim never trigger a dodge, and if one is in the bowl or in
 bowl stays put: moving into a hand made it lose steps.
 Shake: staying put let one hand held low pin the bowl while the other took the lid. So whenever
 the bowl is holding (a low hand in its way, cornered at the end, a hand that has not come
-closer) and any hand point is within --shake-near mm of the rim centre, it rattles: a --shake mm
-hop towards the middle and straight back, again and again until the hand goes or the way clears.
-The hop is short and gentle (about 0.1 s each way), so bumping a hand loses no steps; if it ever
-does, the marker check re-homes as usual.
+closer) and a hand point at least --shake-below mm below the rim (2 cm: a hand down beside the
+bowl, not one over it) is within --shake-near mm of the rim centre, it rattles: a --shake mm hop
+towards the middle and straight back, again and again until the hand goes or the way clears.
+Each way takes about 0.15 s; if bumping a hand ever loses steps, the marker check re-homes as usual.
+(12 mm hops did little, and counting hands over the bowl made it shake far too often.)
 Lost steps: whenever the bowl is still, the base marker's position is compared with the axis.
 If they differ by more than --slip mm, it re-homes by itself (about 3 s) and goes on. (Not
 G92: Marlin shifts its soft limits with it, so a stall point became a wall.) 800 mm/s at 8000 mm/s2 with the bowl lost steps on long moves
@@ -295,8 +296,10 @@ def main() -> int:
     ap.add_argument("--height", type=float, default=250, help="...and at most this high above the rim, mm")
     ap.add_argument("--feint", type=float, default=0.3, help="share of dodges that are feints, 0 to 1")
     ap.add_argument("--hyst", type=float, default=50, help="after a move, the hand must come this much closer, mm")
-    ap.add_argument("--shake", type=float, default=12, help="hop of the shake when a near hand pins the bowl, mm; 0 for none")
+    ap.add_argument("--shake", type=float, default=25, help="hop of the shake when a near hand pins the bowl, mm; 0 for none")
     ap.add_argument("--shake-near", type=float, default=150, help="shake when a hand point is this close to the rim centre, mm")
+    ap.add_argument("--shake-below", type=float, default=20,
+                    help="shake only for a hand point at least this far below the rim, mm")
     ap.add_argument("--shake-speed", type=float, default=300, help="shake top speed, mm/s")
     ap.add_argument("--shake-accel", type=float, default=5000, help="shake acceleration, mm/s^2")
     ap.add_argument("--horns-hold", type=float, default=0.3, help="horns held this long stop the game, s")
@@ -748,8 +751,9 @@ def main() -> int:
                 hold = last_hold  # mid-shake: still the same hold
             elif (hold and not moving and a.shake > 0 and state["enabled"] and not state["stopped"]
                     and not state["banner"]):
-                near = min((float(np.hypot(p[0], p[1])) for _, rp in hand_rps for p in rp if p[2] < a.height),
-                           default=np.inf)
+                # Only a hand down beside the bowl pins it; one over the opening is a reach.
+                near = min((float(np.hypot(p[0], p[1])) for _, rp in hand_rps for p in rp
+                            if p[2] < -a.shake_below), default=np.inf)
                 if near < a.shake_near:
                     axis.shake(a.shake if y < YMID else -a.shake, a.shake_speed, a.shake_accel)
                     moving = True
