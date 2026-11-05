@@ -13,8 +13,10 @@ message on a queue, so it returns at once; the sound card's own thread does the 
 What plays, from the SOUNDS table below (one line per sound: files, group, level, when):
 - the hand tone, made live: a ghostly theremin (or glass harmonica, or choir) whose pitch follows
   the nearest hand's height above the rim, snapped to a dark scale with a glide between notes;
-  closeness to the bowl makes it louder and brighter, a fast hand makes it shiver. The wind
-  rises as a hand comes near.
+  closeness to the bowl makes it louder and brighter, a fast hand makes it shiver. Layers sound
+  with the note: an octave under, a held root, a faint ghost above, and a third and a fifth that
+  grow into a chord as the hand comes close, each trailing the note a moment. The wind rises as
+  a hand comes near.
 - the skull's voice by mood: snores in time with the mouth while sleeping, a sniff when it
   wakes, low breaths while watching, layered growls on every dodge, grumbles while a hand is in
   the bowl, a cackle now and then after a dodge that beat the hand, sobs and wails while crying.
@@ -154,14 +156,31 @@ HAND = {
 INSTRUMENTS = {
     # root (MIDI note of the lowest), notes across the height, partials (ratio, level), how much
     # brighter it gets close up, vibrato (Hz, semitones), voices (detune cents, level), attack and
-    # release s, glide s.
+    # release s, glide s, and the layers played with the hand's note (see LAYER below).
     "theremin": dict(root=57, notes=11, partials=((1, 1.0), (2, 0.10), (3, 0.13), (4, 0.03), (5, 0.04)),
-                     bright=0.9, vib=(5.6, 0.22), voices=((0, 1.0),), attack=0.35, release=0.9, glide=0.09),
+                     bright=0.9, vib=(5.6, 0.22), voices=((0, 1.0),), attack=0.35, release=0.9, glide=0.09,
+                     layers=(dict(oct=-1, level=0.45, glide=0.16),  # an octave under: body
+                             dict(steps=2, level=0.32, glide=0.22, near=1.0),  # a third, as the hand comes
+                             dict(steps=4, level=0.24, glide=0.30, near=1.0),  # a fifth, as the hand comes
+                             dict(oct=1, level=0.10, cents=7, glide=0.06, near=0.6),  # a faint ghost above
+                             dict(drone=True, level=0.20, glide=1.5))),  # the root held under it all
     "glass": dict(root=69, notes=10, partials=((1, 1.0), (2.0, 0.08), (3.0, 0.05), (4.2, 0.015)),
-                  bright=0.5, vib=(4.0, 0.04), voices=((-3, 0.75), (4, 0.3)), attack=0.6, release=1.4, glide=0.12),
+                  bright=0.5, vib=(4.0, 0.04), voices=((-3, 0.75), (4, 0.3)), attack=0.6, release=1.4, glide=0.12,
+                  layers=(dict(oct=-1, level=0.35, glide=0.2),
+                          dict(steps=2, level=0.30, glide=0.25, near=1.0),
+                          dict(steps=4, level=0.22, glide=0.35, near=1.0))),
     "choir": dict(root=50, notes=11, partials=None, bright=1.0, vib=(5.0, 0.15),
-                  voices=((-10, 0.6), (0, 0.7), (9, 0.6)), attack=0.7, release=1.2, glide=0.14),
+                  voices=((-10, 0.6), (0, 0.7), (9, 0.6)), attack=0.7, release=1.2, glide=0.14,
+                  layers=(dict(steps=2, level=0.45, glide=0.25, near=1.0),  # the choir sings a chord
+                          dict(steps=4, level=0.35, glide=0.35, near=1.0))),
 }
+# A layer: another pitch played with the hand's note, through the same partials and vibrato.
+# steps: scale steps above the note (2 is the third, 4 the fifth, in the scale); oct: octaves up
+# or down; drone: the root instead of the note; level against the note's 1.0; near: how much it
+# waits for the hand to come close (0 always there, 1 only close); cents: detune; glide: its own,
+# slower than the note's, so the harmony trails a moment behind and shimmers as the hand moves.
+# The tone is kept at the same loudness however many layers sound: they add colour, not volume.
+LAYER = dict(steps=0, oct=0, drone=False, level=1.0, near=0.0, cents=0.0, glide=None)
 # The choir's vowel goes from "oo" (far) to "ah" (close): formant Hz, level, width.
 VOWELS = {"oo": ((300, 1.0, 70), (870, 0.30, 90), (2240, 0.10, 140)),
           "ah": ((730, 1.0, 90), (1090, 0.55, 110), (2440, 0.25, 140))}
@@ -382,7 +401,7 @@ class HandTone:
     input is smoothed here as well, per block, so it glides and never steps."""
 
     def __init__(self, voice: str = HAND["voice"]) -> None:
-        self.phases = np.zeros(1)  # each singer's running phase
+        self.phases = np.zeros((1, 1))  # each layer's and singer's running phase
         self.set_voice(voice)
         self.present = False
         self.height = 0.5  # 0 bottom note, 1 top
@@ -401,8 +420,12 @@ class HandTone:
 
     def set_voice(self, voice: str) -> None:
         self.voice, self.ins = voice, INSTRUMENTS[voice]
-        if len(self.phases) != len(self.ins["voices"]):
-            self.phases = np.resize(self.phases, len(self.ins["voices"]))
+        # The note itself is layer 0.
+        self.layers = [dict(LAYER, glide=self.ins["glide"])] + [{**LAYER, **la} for la in self.ins.get("layers", ())]
+        shape = (len(self.layers), len(self.ins["voices"]))
+        if self.phases.shape != shape:
+            self.phases = np.zeros(shape)
+        self.lpitch = [None] * len(self.layers)  # MIDI, gliding, per layer
         self.offsets = np.random.default_rng(1).uniform(0, 2 * np.pi, 48)
         self.offsets[0] = 0.0
 
@@ -410,47 +433,9 @@ class HandTone:
         scale = HAND["scale"]
         return self.ins["root"] + 12 * (step // len(scale)) + scale[step % len(scale)]
 
-    def render(self, out: np.ndarray) -> None:
-        ins, dt = self.ins, BLOCK / SR
-        a = lambda tau: 1 - math.exp(-dt / tau)
-        # Loudness: fade in while a hand is here, out when it goes.
-        tau = ins["attack"] if self.present else ins["release"]
-        target = 1.0 if self.present else 0.0
-        amp0 = self.amp
-        self.amp += (target - self.amp) * a(tau / 3)
-        if self.amp < 1e-4 and not self.present:
-            self.amp = 0.0
-            self.note = self.pitch = None
-            return
-        self.close += (self.close_in - self.close) * a(0.25)
-        self.shiver += (self.shiver_in - self.shiver) * a(0.15)
-        self.softness += ((db(HAND["crying_db"]) if self.soft else 1.0) - self.softness) * a(0.5)
-        # The note: the nearest scale step, changed only once the hand is clearly nearer another
-        # (well past the halfway point), and held at least a moment, so a hand held still does
-        # not flicker between two notes.
-        x = self.height * (ins["notes"] - 1)
-        self.note_age += dt
-        if self.note is None or (abs(x - self.note) > 0.8 and self.note_age > 0.12):
-            self.note = int(round(x))
-            self.note_age = 0.0
-        p_target = self.step_pitch(self.note)
-        p0 = p_target if self.pitch is None else self.pitch
-        p1 = p0 + (p_target - p0) * a(ins["glide"])
-        self.pitch = p1
-        # Vibrato blooms once a note has settled, as a singer's does, and grows with the shiver
-        # (a fast hand), as does a tremolo.
-        vrate, vdepth = ins["vib"]
-        vrate *= 1 + 0.35 * self.shiver
-        vdepth = vdepth * min(1.0, 0.35 + self.note_age / 0.4) + 0.45 * self.shiver
-        vib = vdepth * np.sin(self.vib_phase + 2 * np.pi * vrate * AR / SR)
-        self.vib_phase = (self.vib_phase + 2 * np.pi * vrate * dt) % (2 * np.pi)
-        midi = p0 + (p1 - p0) * AR / BLOCK + vib
-        f0 = 440.0 * 2 ** ((midi - 69) / 12)
-        bright = 0.25 + 0.75 * self.close * ins["bright"]
-        level = db(HAND["quiet_db"] * (1 - self.close))
-        trem = 1 - 0.3 * self.shiver * (0.5 + 0.5 * np.sin(self.trem_phase + 2 * np.pi * 7.5 * AR / SR))
-        self.trem_phase = (self.trem_phase + 2 * np.pi * 7.5 * dt) % (2 * np.pi)
-        env = (amp0 + (self.amp - amp0) * AR / BLOCK) * level * self.softness * trem
+    def _layer(self, li: int, f0: np.ndarray, bright: float) -> np.ndarray:
+        """One layer of the tone at the gliding pitch f0 (Hz, per sample), all its singers."""
+        ins = self.ins
         mean_f = float(f0.mean())
         if ins["partials"] is None:  # the choir: harmonics shaped by a vowel
             k = np.arange(1, int(min(4500.0 / mean_f, 40)) + 1)
@@ -472,10 +457,63 @@ class HandTone:
         offs = self.offsets[:len(ratios)]
         tone = np.zeros(BLOCK)
         for v, (cents, vlevel) in enumerate(ins["voices"]):
-            ph = self.phases[v] + 2 * np.pi * np.cumsum(f0 * 2 ** (cents / 1200)) / SR
-            self.phases[v] = ph[-1]
+            ph = self.phases[li, v] + 2 * np.pi * np.cumsum(f0 * 2 ** (cents / 1200)) / SR
+            self.phases[li, v] = ph[-1] % (2 * np.pi)
             tone += vlevel * (amps[:, None] * np.sin(ratios[:, None] * ph[None, :] + offs[:, None])).sum(axis=0)
-        tone /= sum(vl for _, vl in ins["voices"])
+        return tone / sum(vl for _, vl in ins["voices"])
+
+    def render(self, out: np.ndarray) -> None:
+        ins, dt = self.ins, BLOCK / SR
+        a = lambda tau: 1 - math.exp(-dt / tau)
+        # Loudness: fade in while a hand is here, out when it goes.
+        tau = ins["attack"] if self.present else ins["release"]
+        target = 1.0 if self.present else 0.0
+        amp0 = self.amp
+        self.amp += (target - self.amp) * a(tau / 3)
+        if self.amp < 1e-4 and not self.present:
+            self.amp = 0.0
+            self.note = self.pitch = None
+            self.lpitch = [None] * len(self.layers)
+            return
+        self.close += (self.close_in - self.close) * a(0.25)
+        self.shiver += (self.shiver_in - self.shiver) * a(0.15)
+        self.softness += ((db(HAND["crying_db"]) if self.soft else 1.0) - self.softness) * a(0.5)
+        # The note: the nearest scale step, changed only once the hand is clearly nearer another
+        # (well past the halfway point), and held at least a moment, so a hand held still does
+        # not flicker between two notes.
+        x = self.height * (ins["notes"] - 1)
+        self.note_age += dt
+        if self.note is None or (abs(x - self.note) > 0.8 and self.note_age > 0.12):
+            self.note = int(round(x))
+            self.note_age = 0.0
+        # Vibrato blooms once a note has settled, as a singer's does, and grows with the shiver
+        # (a fast hand), as does a tremolo.
+        vrate, vdepth = ins["vib"]
+        vrate *= 1 + 0.35 * self.shiver
+        vdepth = vdepth * min(1.0, 0.35 + self.note_age / 0.4) + 0.45 * self.shiver
+        vib = vdepth * np.sin(self.vib_phase + 2 * np.pi * vrate * AR / SR)
+        self.vib_phase = (self.vib_phase + 2 * np.pi * vrate * dt) % (2 * np.pi)
+        bright = 0.25 + 0.75 * self.close * ins["bright"]
+        level = db(HAND["quiet_db"] * (1 - self.close))
+        trem = 1 - 0.3 * self.shiver * (0.5 + 0.5 * np.sin(self.trem_phase + 2 * np.pi * 7.5 * AR / SR))
+        self.trem_phase = (self.trem_phase + 2 * np.pi * 7.5 * dt) % (2 * np.pi)
+        env = (amp0 + (self.amp - amp0) * AR / BLOCK) * level * self.softness * trem
+        tone = np.zeros(BLOCK)
+        power = 0.0
+        for li, la in enumerate(self.layers):
+            gate = la["level"] * (1 - la["near"] * (1 - self.close))
+            p_target = (ins["root"] if la["drone"] else self.step_pitch(self.note + la["steps"])) + 12 * la["oct"]
+            p0 = p_target if self.lpitch[li] is None else self.lpitch[li]
+            p1 = p0 + (p_target - p0) * a(la["glide"])
+            self.lpitch[li] = p1
+            if li == 0:
+                self.pitch = p1
+            if gate < 1e-3:
+                continue
+            power += gate * gate
+            f0 = 440.0 * 2 ** ((p0 + (p1 - p0) * AR / BLOCK + vib + la["cents"] / 100 - 69) / 12)
+            tone += gate * self._layer(li, f0, bright)
+        tone /= math.sqrt(power)  # the same loudness however many layers sound
         out += (tone * env).astype(np.float32)[:, None]
 
 
