@@ -31,6 +31,12 @@ bowl then goes on to an end instead. (Calling it off for a hand over the end as 
 feint stop in the middle and go on in two steps.)
 Hand points below the rim never trigger a dodge, and if one is in the bowl or in its path, the
 bowl stays put: moving into a hand made it lose steps.
+Shake: staying put let one hand held low pin the bowl while the other took the lid. So whenever
+the bowl is holding (a low hand in its way, cornered at the end, a hand that has not come
+closer) and any hand point is within --shake-near mm of the rim centre, it rattles: a --shake mm
+hop towards the middle and straight back, again and again until the hand goes or the way clears.
+The hop is short and gentle (about 0.1 s each way), so bumping a hand loses no steps; if it ever
+does, the marker check re-homes as usual.
 Lost steps: whenever the bowl is still, the base marker's position is compared with the axis.
 If they differ by more than --slip mm, it re-homes by itself (about 3 s) and goes on. (Not
 G92: Marlin shifts its soft limits with it, so a stall point became a wall.) 800 mm/s at 8000 mm/s2 with the bowl lost steps on long moves
@@ -151,21 +157,48 @@ class Axis:
         self.t0 = 0.0
         self.dur = 0.0
         self.speed = self.accel = 1.0
+        self.hop = 0.0  # a shake: how far out (signed, mm) before coming straight back; 0 for a move
+
+    @staticmethod
+    def duration(dist: float, speed: float, accel: float) -> float:
+        return (2 * (dist / accel) ** 0.5 if speed * speed / accel >= dist
+                else 2 * speed / accel + (dist - speed * speed / accel) / speed)
 
     def move(self, target: float, speed: float, accel: float) -> None:
         target = min(max(target, YMIN), YMAX)
         now = time.monotonic()
         self.start, self.target = self.y(now), target
         self.speed, self.accel = speed, accel
-        dist = abs(target - self.start)
-        self.dur = (2 * (dist / accel) ** 0.5 if speed * speed / accel >= dist
-                    else 2 * speed / accel + (dist - speed * speed / accel) / speed)
+        self.hop = 0.0
+        self.dur = self.duration(abs(target - self.start), speed, accel)
         if self.m:
             self.m.send(f"M204 P{accel:g} T{accel:g}")
             self.m.send(f"G0 Y{target:.1f} F{speed * 60:g}")
         self.t0 = time.monotonic() + LAG
 
+    def shake(self, hop: float, speed: float, accel: float) -> None:
+        """A hop of `hop` mm (signed) and straight back, sent as one pair so the bed always ends
+        where it started. Marlin stops dead at the turn: the two moves point opposite ways."""
+        now = time.monotonic()
+        y0 = self.y(now)
+        out = min(max(y0 + hop, YMIN), YMAX)
+        self.start = self.target = y0
+        self.hop = out - y0
+        self.speed, self.accel = speed, accel
+        self.dur = 2 * self.duration(abs(self.hop), speed, accel)
+        if self.m:
+            self.m.send(f"M204 P{accel:g} T{accel:g}")
+            self.m.send(f"G0 Y{out:.1f} F{speed * 60:g}")
+            self.m.send(f"G0 Y{y0:.1f} F{speed * 60:g}")
+        self.t0 = time.monotonic() + LAG
+
     def y(self, now: float) -> float:
+        if self.hop:
+            dist, leg = abs(self.hop), self.dur / 2
+            t = min(max(now - self.t0, 0.0), self.dur)
+            d = (travelled(dist, self.speed, self.accel, t) if t < leg
+                 else dist - travelled(dist, self.speed, self.accel, t - leg))
+            return self.start + np.sign(self.hop) * d
         dist = abs(self.target - self.start)
         if dist == 0:
             return self.target
@@ -174,6 +207,9 @@ class Axis:
 
     def moving(self, now: float) -> bool:
         return now < self.t0 + self.dur
+
+    def shaking(self, now: float) -> bool:
+        return bool(self.hop) and self.moving(now)
 
 
 FACE_VID = 0x2886  # Seeed: the XIAO RP2350 that drives the face LEDs
@@ -255,6 +291,10 @@ def main() -> int:
     ap.add_argument("--height", type=float, default=250, help="...and at most this high above the rim, mm")
     ap.add_argument("--feint", type=float, default=0.3, help="share of dodges that are feints, 0 to 1")
     ap.add_argument("--hyst", type=float, default=50, help="after a move, the hand must come this much closer, mm")
+    ap.add_argument("--shake", type=float, default=12, help="hop of the shake when a near hand pins the bowl, mm; 0 for none")
+    ap.add_argument("--shake-near", type=float, default=150, help="shake when a hand point is this close to the rim centre, mm")
+    ap.add_argument("--shake-speed", type=float, default=300, help="shake top speed, mm/s")
+    ap.add_argument("--shake-accel", type=float, default=5000, help="shake acceleration, mm/s^2")
     ap.add_argument("--horns-hold", type=float, default=0.3, help="horns held this long stop the game, s")
     ap.add_argument("--resume", type=float, default=10.0, help="after a horns stop, time to take a sweet in the middle, s")
     ap.add_argument("--slide", type=float, default=150, help="speed of the slide to the middle, mm/s")
@@ -594,7 +634,10 @@ def main() -> int:
             # only a hand gone for FORGET s lets the next one count at once.
             if np.isfinite(dist):
                 hand_seen = now
-                ref = dist if moving else min(a.trigger + a.hyst, max(ref, dist))
+                # A shake is not a getaway: it leaves ref alone, or a hand creeping in during a
+                # long rattle would never count as coming closer.
+                ref = (dist if moving and not axis.shaking(now)
+                       else min(a.trigger + a.hyst, max(ref, dist)))
             elif now - hand_seen > FORGET:
                 ref = a.trigger + a.hyst
             # A hand over the opening always counts; otherwise a hand that followed the bowl to
@@ -679,6 +722,24 @@ def main() -> int:
                         + f"; frame to command {1000 * (time.monotonic() - seen_at):.0f} ms")
             elif not moving and not reaching:
                 state["text"] = "watching" if state["enabled"] else "dodging off"
+
+            # Shake: the bowl is holding (a hand below the rim in its way, cornered at the end, a
+            # hand at the bowl that has not come closer) but a hand is close. It rattles a short
+            # hop in and straight back, again and again, so one hand held low cannot pin it while
+            # the other takes the lid. Always towards the middle: at an end that is the only way.
+            if axis.shaking(now):
+                hold = last_hold  # mid-shake: still the same hold
+            elif (hold and not moving and a.shake > 0 and state["enabled"] and not state["stopped"]
+                    and not state["banner"]):
+                near = min((float(np.hypot(p[0], p[1])) for _, rp in hand_rps for p in rp if p[2] < a.height),
+                           default=np.inf)
+                if near < a.shake_near:
+                    axis.shake(a.shake if y < YMID else -a.shake, a.shake_speed, a.shake_accel)
+                    moving = True
+                    snarl_until = max(snarl_until, now + 1.5)
+                    hold = "shaking: " + hold.removeprefix("holding: ")
+                    if snd and not (last_hold or "").startswith("shaking"):
+                        snd.event("cornered")
             if hold:
                 state["text"] = hold
             if (hold or "").split(" at ")[0] != (last_hold or "").split(" at ")[0]:
