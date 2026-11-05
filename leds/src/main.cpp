@@ -1,6 +1,6 @@
 // Face LEDs on one WS2812 chain on D10. The four moods from face/face_preview.html: sleeping
 // (waiting), watching, snarl, crying (gives up). The same chain goes on to the 8-LED ring under
-// the printed horns hand: it glows white as the hint while the face is awake and fills green
+// the printed horns hand: it glows yellow as the hint while the face is awake and fills green
 // when the horns have stopped the game.
 //
 // scripts/dodge.py sets the mood over USB serial, one line at a time: a mood letter, s w n c,
@@ -226,10 +226,10 @@ void crying(float t) {
 
 // ---- the ring under the horns hand ----
 
-const Rgb HINT = { 255, 255, 255 }, GREEN = { 0, 255, 40 };
+const Rgb HINT = YELLOW, GREEN = { 0, 255, 40 };
 
-// Off while the face sleeps. Watching, a slow white breath says "this hand"; snarling, it blinks
-// white and red to pull the eye to it. Once the horns have worked it fills green one LED at a
+// Off while the face sleeps. Watching, a slow yellow breath says "this hand"; snarling, it blinks
+// yellow and red to pull the eye to it. Once the horns have worked it fills green one LED at a
 // time, then stays lit; since is how long ago that began.
 void signRing(int mood, float t, float since) {
   auto set = [](int i, Rgb c, float v) { signT[i][0] = c.r * v; signT[i][1] = c.g * v; signT[i][2] = c.b * v; };
