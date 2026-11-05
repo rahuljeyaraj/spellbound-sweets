@@ -121,13 +121,15 @@ class Camera:
         self.cap.release()
 
 
-def open_cameras(indexes: list[int], exposure: float | None,
+def open_cameras(indexes: list[int], exposure: float | None | list[float | None],
                  gains: list[float] | None = None) -> list[Camera]:
-    """Open each camera; if one fails, close the ones already open before raising."""
+    """Open each camera; if one fails, close the ones already open before raising. exposure is
+    one value for all, or a list with one per camera (None in it: that camera on auto)."""
+    exposures = list(exposure) if isinstance(exposure, (list, tuple)) else [exposure] * len(indexes)
     cams: list[Camera] = []
     try:
         for k, i in enumerate(indexes):
-            cams.append(Camera(i, exposure, gain=gains[k] if gains else None))
+            cams.append(Camera(i, exposures[k], gain=gains[k] if gains else None))
     except Exception:
         for c in cams:
             c.close()

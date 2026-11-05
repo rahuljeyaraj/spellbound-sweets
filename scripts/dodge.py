@@ -2,6 +2,7 @@
 
     uv run python scripts/dodge.py --exposure -5                    # dry run: nothing moves
     uv run python scripts/dodge.py --port COM9 --exposure -5        # the real thing
+    uv run python scripts/dodge.py --port COM9 --exposure auto -5 --gain 0 64   # evening light
     uv run python scripts/dodge.py --port COM9 --speed 300 --accel 3000 --trigger 140
 
 Needs stereo_calibrate.py, bowl_calibrate.py and rim_calibrate.py done first. Run
@@ -287,7 +288,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--port", help="the SKR's serial port, e.g. COM9; leave out for a dry run")
     ap.add_argument("--cams", type=int, nargs=2, default=[0, 1], help="camera numbers (2 is OBS)")
-    ap.add_argument("--exposure", type=float, help="lock exposure (e.g. -5); default auto")
+    ap.add_argument("--exposure", nargs="+", type=lambda v: None if v == "auto" else float(v),
+                    help="lock exposure (e.g. -5), or one per camera (e.g. auto -5); default auto. "
+                         "Longer than -5 (e.g. -4) camera 1 drops to 16 fps; camera 0 tops out dim on a locked "
+                         "exposure in evening light but is bright on auto at a full 30 fps")
     ap.add_argument("--gain", type=float, nargs=2, default=[0, 32],
                     help="gain per camera; 32 on camera 1 matches its brightness to camera 0")
     ap.add_argument("--speed", type=float, default=700, help="dodge top speed, mm/s")
@@ -345,7 +349,8 @@ def main() -> int:
     cv2.namedWindow("dodge", cv2.WINDOW_NORMAL)  # resizable, to fit the screen
     cv2.resizeWindow("dodge", WIDTH * 3 // 4, (70 + HEIGHT // 2 + 420) * 3 // 4)
     try:
-        cams = open_cameras(a.cams, a.exposure, a.gain)
+        exposure = (a.exposure or [None]) * (2 if a.exposure is None or len(a.exposure) == 1 else 1)
+        cams = open_cameras(a.cams, exposure, a.gain)
         wait_for_frames(cams)
         dets = [Detector(c, 2) for c in cams]
         tracker = Tracker(0.5)
