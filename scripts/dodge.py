@@ -51,8 +51,10 @@ at once on d), and the bowl goes on to an end as usual, unless a hand is still i
 must be dropped and shown again to stop it again, so holding them up does not stop it for good.
 
 Face: the LED face (leds/src/main.cpp) is found on USB by itself (--face). It sleeps when no
-hand has been seen for 2 s, watches while one is about, snarls for 1.5 s from each dodge or
-feint and while a hand is in the bowl, and cries while the horns have stopped the game. The
+hand has been seen for 2 s, watches while one is about, snarls from each dodge, feint or shake
+and while a hand is in the bowl, and cries while the horns have stopped the game. Once snarling
+it keeps on while a hand stays within --trigger mm, and for --snarl-hold s after (3 s: in case
+it comes back), so it does not flick between snarling and watching. The
 eyes follow the hand nearest the bowl along the rail, from the rail's middle; --face-flip if
 they look the wrong way. If dodge.py stops sending, the face falls asleep after 2 s.
 
@@ -300,6 +302,8 @@ def main() -> int:
     ap.add_argument("--slide", type=float, default=150, help="speed of the slide to the middle, mm/s")
     ap.add_argument("--slide-accel", type=float, default=1000, help="acceleration of that slide, mm/s^2")
     ap.add_argument("--face", default="auto", help="the LED face's serial port; auto finds it, none for no face")
+    ap.add_argument("--snarl-hold", type=float, default=3.0,
+                    help="the face snarls this long after a dodge, or after a hand leaves the bowl or goes, s")
     ap.add_argument("--face-flip", action="store_true", help="the eyes look the wrong way: mirror them")
     ap.add_argument("--sound", default="auto", help="auto plays on the USB speaker, none for no sound")
     ap.add_argument("--sound-device", help="the speaker: device number or part of its name (sound.py --devices)")
@@ -682,7 +686,7 @@ def main() -> int:
                     say("feint: return cancelled, hand in the way")
                 else:
                     axis.move(pending, a.speed, a.accel)
-                    snarl_until = now + 1.5
+                    snarl_until = now + a.snarl_hold
                     state["text"] = f"FEINT back to Y{pending:.0f}"
                     moving = True
                     if snd:
@@ -713,7 +717,7 @@ def main() -> int:
                         target = YMID
                         kind = "feint"
                     axis.move(target, a.speed, a.accel)
-                    snarl_until = now + 1.5
+                    snarl_until = now + a.snarl_hold
                     state["text"] = f"{kind.upper()} to Y{target:.0f}"
                     if snd:
                         snd.move(kind, axis)
@@ -736,7 +740,7 @@ def main() -> int:
                 if near < a.shake_near:
                     axis.shake(a.shake if y < YMID else -a.shake, a.shake_speed, a.shake_accel)
                     moving = True
-                    snarl_until = max(snarl_until, now + 1.5)
+                    snarl_until = max(snarl_until, now + a.snarl_hold)
                     hold = "shaking: " + hold.removeprefix("holding: ")
                     if snd and not (last_hold or "").startswith("shaking"):
                         snd.event("cornered")
@@ -747,14 +751,19 @@ def main() -> int:
                     say(hold)
                 last_hold = hold
 
-            # The face: crying while it has given up (horns), snarling during and just after a
-            # dodge or while a hand is in the bowl, watching while a hand is about, else asleep.
+            # The face: crying while it has given up (horns), snarling during and for a while after
+            # a dodge or while a hand is in the bowl, watching while a hand is about, else asleep.
             # The eyes follow the nearest hand along the rail, seen from the face at the rail's
             # middle. The sound gets the same mood and the palms.
             if hands0 or hands1:
                 hand_any = now
             in_bowl = path_blocked(low, 0.0, rail.radius)
-            mood = ("c" if state["stopped"] else "n" if now < snarl_until or in_bowl
+            # Snarling lasts while a hand is in the bowl or still near, and --snarl-hold s after:
+            # a hand pulled back for a moment often comes again, and the face flicking between
+            # snarling and watching looked nervous, not fierce.
+            if in_bowl or (now < snarl_until and dist < a.trigger):
+                snarl_until = max(snarl_until, now + a.snarl_hold)
+            mood = ("c" if state["stopped"] else "n" if now < snarl_until
                     else "w" if now - hand_any < 2.0 else "s")
             palms = rail.to_rail(np.array([tr.palm for tr, _ in current]), y) if current else None
             if face:

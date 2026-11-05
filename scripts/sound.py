@@ -696,9 +696,9 @@ class Mixer:
         r = self.rng.uniform
         self.snore_k = 1  # the first cycle leaves room for the sigh of falling asleep
         self.next_snore = None
-        # A snarl from a dodge lasts 1.5 s and has its growl; grumbles are for a snarl that stays
-        # (a hand in the bowl), so the first waits longer than that.
-        self.next_at = {"w": at + int(r(1.0, 2.0) * SR), "n": at + int(r(1.7, 3.0) * SR),
+        # A snarl from a dodge lasts dodge.py's --snarl-hold (3 s) and has its growl; grumbles are
+        # for a snarl that stays (a hand in the bowl or still near), so the first waits longer.
+        self.next_at = {"w": at + int(r(1.0, 2.0) * SR), "n": at + int(r(3.2, 4.2) * SR),
                         "c": at + int(0.9 * SR)}.get(mood)
 
     def _patterns(self, end: int) -> None:
