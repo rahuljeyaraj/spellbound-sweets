@@ -69,8 +69,10 @@ class Camera:
                 "probably sharing one USB port or hub: plug them into separate ports.")
         # The driver remembers these after the program closes, so always set them one way or the
         # other. DirectShow: 0.25 is manual exposure, 0.75 is auto; exposure is a power of two in
-        # seconds (-6 is 1/64 s). Auto exposure lets a camera drop to 24 fps in room light, so
-        # lock it for a steady 30 (-5 suits the room); it goes black if the room gets darker.
+        # seconds (-6 is 1/64 s). Auto exposure once let a camera drop to 24 fps in room light;
+        # on 2026-11-05 both held 30 on auto, and a locked exposure looked different every run,
+        # because the driver keeps whatever gain auto last chose. So dodge.py now runs on auto.
+        # Locked, camera 1 drops to 16 fps at -4 and 8 at -3.
         # White balance does not affect frame rate. Leave it auto: one fixed temperature turned
         # one camera blue and the other red.
         if exposure is None:

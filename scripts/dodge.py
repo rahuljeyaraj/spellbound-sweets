@@ -1,12 +1,15 @@
 """The bowl dodges a reaching hand.
 
-    uv run python scripts/dodge.py --exposure -5                    # dry run: nothing moves
-    uv run python scripts/dodge.py --port COM9 --exposure -5        # the real thing
-    uv run python scripts/dodge.py --port COM9 --exposure auto -5 --gain 0 64   # evening light
+    uv run python scripts/dodge.py                                  # dry run: nothing moves
+    uv run python scripts/dodge.py --port COM9                      # the real thing (cameras on auto)
+    uv run python scripts/dodge.py --port COM9 --exposure auto -5 --gain 0 64   # one locked, if ever needed
     uv run python scripts/dodge.py --port COM9 --speed 300 --accel 3000 --trigger 140
 
 Needs stereo_calibrate.py, bowl_calibrate.py and rim_calibrate.py done first. Run
-bowl_calibrate.py again whenever the table or printer has moved.
+bowl_calibrate.py before every start: the printer slides on the table.
+Cameras on auto exposure (the default). A locked exposure looked different from run to run: the
+driver keeps the gain auto last chose, so the same number came out dark one time and washed out
+the next (2026-11-05). On auto both cameras held 30 fps in room light.
 
 Every frame, both cameras find the hands; all 21 points of each hand are put into "rail
 coordinates" around the rim centre: how far along the rail, how far across it and how high
