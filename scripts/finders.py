@@ -14,7 +14,10 @@ So each frame pair runs, in parallel on a pool of threads, each with its own lan
     whole frame found needs no help);
   - guided crops: a hand only one camera found must lie on that camera's line of sight. The
     stretch of that line inside the play zone is drawn into the other camera and crops are placed
-    along it, so the other camera looks hard exactly where the hand has to be;
+    along it, so the other camera looks hard exactly where the hand has to be. A lone hand that
+    stays put for GIVE_UP s without being found is let go until it moves: on 2026-11-05 Rahul's
+    hands on his keyboard, which camera 0 only sees cut off at its edge, kept the guided crops
+    busy for a whole run and slowed it to 21 frames a second;
   - sweep tiles: half- and third-size tiles over the whole frame, a few per frame in turn, to
     catch a hand both cameras missed. As many as fit: the sweep grows while the frame pair takes
     under the camera's frame time and shrinks when it takes longer.
@@ -46,6 +49,7 @@ FOLLOW = 2.5  # follow and guided crops: this many times the hand's size
 MIN_SIDE, MAX_SIDE = 240, HEIGHT  # crop side limits, px
 MAX_FOLLOW = 4  # follow crops per camera
 MAX_GUIDED = 3  # guided crops per lone hand
+GIVE_UP = 0.5  # s a lone hand that stays put is searched for in the other camera
 FRAME_S = 1 / 30  # camera frame time: the sweep grows while a frame pair takes less
 
 
@@ -207,6 +211,7 @@ class Finders:
         last_counts, last_ts = (-1, -1), [-1, -1]
         follow: list[list[np.ndarray]] = [[], []]
         lone: list[tuple[int, np.ndarray]] = []
+        searched: list[tuple[int, float, float, float, float, float]] = []  # camera, x, y, size, since, last seen
         while self.running:
             got = [c.latest() for c in self.cams]
             counts = tuple(g[2] for g in got)
@@ -239,6 +244,23 @@ class Finders:
             pairs = match_hands(self.cal, hands[0], hands[1], 20)
             lone = [(k, h) for k in (0, 1) for i, h in enumerate(hands[k])
                     if i not in {p[2 + k] for p in pairs}]
+            # Give up on a lone hand that has stayed put (within half its size) for GIVE_UP s. A
+            # spot is remembered for a second after its hand was last seen, so a hand that drops
+            # out for a frame or two is not searched for afresh.
+            now, keep = time.monotonic(), []
+            searched = [e for e in searched if now - e[5] < 1.0]
+            for k, h in lone:
+                x, y, size = hand_box(h)
+                i = next((i for i, e in enumerate(searched)
+                          if e[0] == k and np.hypot(e[1] - x, e[2] - y) < 0.5 * size), None)
+                since = searched[i][4] if i is not None else now
+                if i is not None:
+                    searched[i] = (k, x, y, size, since, now)
+                else:
+                    searched.append((k, x, y, size, since, now))
+                if now - since < GIVE_UP:
+                    keep.append((k, h))
+            lone = keep
             secs = time.perf_counter() - t0
             # Use what is spare: more sweep tiles while a frame pair takes under a camera frame.
             if secs < FRAME_S * 0.85 and self.sweep < self.sweep_max:
