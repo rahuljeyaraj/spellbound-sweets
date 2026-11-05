@@ -246,12 +246,14 @@ def hold(v: Viewer, seconds: float) -> None:
         time.sleep(0.01)
 
 
-def report(v: Viewer, cal: Calibration, found: dict[int, list[tuple[float, np.ndarray, float]]],
-           sizes: dict[int, float], stops: int) -> bool:
-    """Fit and check the axis for each marker seen, save the best, and say how it went."""
+def fit_markers(cal: Calibration, found: dict[int, list[tuple[float, np.ndarray, float]]],
+                sizes: dict[int, float], stops: int) -> tuple[dict[int, dict], list[str]]:
+    """Fit and check the axis for each marker seen. Returns per marker id its fit (home, step,
+    up, ok, ...) and the lines saying how it went. Shared with dodge.py, which calibrates by
+    itself when it finds the printer has moved."""
+    lines: list[str] = []
     if not found:
-        v.say("no marker seen at any stop")
-        return False
+        return {}, ["no marker seen at any stop"]
     between_cams = -cal.R.T @ cal.T.ravel() / 2  # "toward the cameras" for the face normal
     results = {}
     for mid, rows in sorted(found.items()):
@@ -259,34 +261,52 @@ def report(v: Viewer, cal: Calibration, found: dict[int, list[tuple[float, np.nd
         Xs = np.array([r[1] for r in rows])
         centres = Xs.mean(axis=1)
         side = float(np.mean([np.linalg.norm(np.roll(X, -1, axis=0) - X, axis=1).mean() for X in Xs]))
-        v.say(f"marker {mid}: seen at {len(rows)} of {stops} stops, size {side:.1f} mm "
-              f"(printed {sizes[mid]:g}, {100 * (side / sizes[mid] - 1):+.1f}%)")
+        lines.append(f"marker {mid}: seen at {len(rows)} of {stops} stops, size {side:.1f} mm "
+                     f"(printed {sizes[mid]:g}, {100 * (side / sizes[mid] - 1):+.1f}%)")
         if len(rows) < 3:
-            v.say("  fewer than 3 stops: cannot fit and check the axis")
+            lines.append("  fewer than 3 stops: cannot fit and check the axis")
             continue
         home, step, off = fit_axis(ys, centres)
         scale = float(np.linalg.norm(step))
         up = face_normal(Xs.mean(axis=0), between_cams)
         tilt = float(np.degrees(np.arcsin(abs(np.dot(step / scale, up)))))
-        v.say(f"  travel {100 * (scale - 1):+.1f}%, off the line {off.max():.1f} mm worst, "
-              f"rail vs bed face {tilt:.1f} deg")
+        lines.append(f"  travel {100 * (scale - 1):+.1f}%, off the line {off.max():.1f} mm worst, "
+                     f"rail vs bed face {tilt:.1f} deg")
         if cal.table_R is not None:
             h = cal.to_table(home.reshape(1, 3))[0]
             d = (step / scale) @ cal.table_R
-            v.say(f"  Y0 at table X {h[0]:.0f}  Y {h[1]:.0f}  height {h[2]:.0f} mm; "
-                  f"rail along X {d[0]:+.3f}  Y {d[1]:+.3f}  Z {d[2]:+.3f}")
+            lines.append(f"  Y0 at table X {h[0]:.0f}  Y {h[1]:.0f}  height {h[2]:.0f} mm; "
+                         f"rail along X {d[0]:+.3f}  Y {d[1]:+.3f}  Z {d[2]:+.3f}")
         ok = abs(scale - 1) < 0.02 and off.max() < 3 and abs(side / sizes[mid] - 1) < 0.03
-        v.say("  check: " + ("GOOD" if ok else "OFF: a camera may have moved, or the marker is not flat"))
+        lines.append("  check: " + ("GOOD" if ok else "OFF: a camera may have moved, the marker is not flat, "
+                                    "or something held the bed back (a spider web round the motor once did)"))
         results[mid] = dict(home=home, step=step, up=up, ys=ys, centres=centres, corners=Xs,
                             side=side, ok=ok, n=len(rows))
+    return results, lines
+
+
+def best_marker(results: dict[int, dict], sizes: dict[int, float]) -> int:
+    """The marker seen at the most stops, then the one whose size came out truest."""
+    return max(results, key=lambda mid: (results[mid]["n"], -abs(results[mid]["side"] / sizes[mid] - 1)))
+
+
+def save_bowl(mid: int, r: dict) -> None:
+    np.savez(BOWL_FILE, marker_id=mid, home=r["home"], step=r["step"], up=r["up"], ys=r["ys"],
+             centres=r["centres"], corners=r["corners"], stamp=time.time())
+
+
+def report(v: Viewer, cal: Calibration, found: dict[int, list[tuple[float, np.ndarray, float]]],
+           sizes: dict[int, float], stops: int) -> bool:
+    """Fit and check the axis for each marker seen, save the best, and say how it went."""
+    results, lines = fit_markers(cal, found, sizes, stops)
+    for line in lines:
+        v.say(line)
     if not results:
         return False
-    best = max(results, key=lambda mid: (results[mid]["n"], -abs(results[mid]["side"] / sizes[mid] - 1)))
-    r = results[best]
-    np.savez(BOWL_FILE, marker_id=best, home=r["home"], step=r["step"], up=r["up"], ys=r["ys"],
-             centres=r["centres"], corners=r["corners"], stamp=time.time())
+    best = best_marker(results, sizes)
+    save_bowl(best, results[best])
     v.say(f"saved marker {best} to calib/bowl.npz")
-    return r["ok"]
+    return results[best]["ok"]
 
 
 if __name__ == "__main__":

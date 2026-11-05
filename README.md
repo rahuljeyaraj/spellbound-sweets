@@ -107,8 +107,9 @@ uv run python scripts/<name>.py
    ```
 
 4. **Find the bowl.** Print the markers and stick the 50 mm one on the slider's base. Print the
-   lid card, lay it on the rim, and give your rim's radius in mm. Run `bowl_calibrate.py` again
-   whenever the printer gets bumped.
+   lid card, lay it on the rim, and give your rim's radius in mm. The printer slides on the
+   table, so the rail needs calibrating before each game: `bowl_calibrate.py`, or `--calibrate`
+   on dodge. Dodge also does it by itself whenever it sees the printer has been pushed sideways.
 
    ```
    uv run python scripts/make_marker.py
@@ -131,7 +132,7 @@ uv run python scripts/<name>.py
    Keys: q quits, h re-homes, d turns dodging on and off.
 
    ```
-   uv run python scripts/dodge.py --port COM9 --exposure -6
+   uv run python scripts/dodge.py --port COM9 --calibrate
    ```
 
 Calibration results go in `calib/`, which is not in git: they only fit my cameras on my wall.

@@ -2,11 +2,20 @@
 
     uv run python scripts/dodge.py                                  # dry run: nothing moves
     uv run python scripts/dodge.py --port COM9                      # the real thing (cameras on auto)
+    uv run python scripts/dodge.py --port COM9 --calibrate          # calibrate the rail first, in here
     uv run python scripts/dodge.py --port COM9 --exposure auto -5 --gain 0 64   # one locked, if ever needed
     uv run python scripts/dodge.py --port COM9 --speed 300 --accel 3000 --trigger 140
 
-Needs stereo_calibrate.py, bowl_calibrate.py and rim_calibrate.py done first. Run
-bowl_calibrate.py before every start: the printer slides on the table.
+Needs stereo_calibrate.py, bowl_calibrate.py and rim_calibrate.py done first. The printer slides
+on the table, so calibrate the rail before every start: bowl_calibrate.py, or --calibrate here,
+which does the same measurement and check in this window. After every home the base marker is
+measured; if the printer has moved sideways (over 10 mm) dodge calibrates the rail by itself
+(about 30 s, the bed going slowly through five stops) and goes on. If that check fails, nothing is
+saved and dodging stays off with the reason on the banner; h tries again.
+
+Hands are found by finders.py: many hand landmarkers at once on both cameras (whole frames,
+crops following each hand, crops along the other camera's line of sight, sweeping tiles), as one
+landmarker on the whole frame missed most hands in camera 0. --plain goes back to that.
 Cameras on auto exposure (the default). A locked exposure looked different from run to run: the
 driver keeps the gain auto last chose, so the same number came out dark one time and washed out
 the next (2026-11-05). On auto both cameras held 30 fps in room light.
@@ -84,15 +93,17 @@ import numpy as np
 import serial
 from serial.tools import list_ports
 
-from bowl_calibrate import BOWL_FILE, draw_markers, match_markers
+from bowl_calibrate import BOWL_FILE, FEED, best_marker, draw_markers, fit_markers, match_markers, save_bowl
+from finders import Finders
 from hand3d import Detector, Map, Tracker, draw_hand, ensure_model, is_horns, match_hands
 from rim_calibrate import RIM_FILE, rail_frame
 from sound import Sound
-from stereo import CALIB_FILE, HEIGHT, WIDTH, Calibration, open_cameras, wait_for_frames
+from stereo import CALIB_FILE, HEIGHT, MARKERS_MM, WIDTH, Calibration, open_cameras, wait_for_frames
 from y_speed import y_switch_triggered
 from y_sweep import Marlin
 
 YMIN, YMAX = 5.0, 215.0
+STOPS = (5.0, 60.0, 110.0, 160.0, 215.0)  # where the rail is measured when dodge calibrates it itself
 YMID = (YMIN + YMAX) / 2
 LAG = 0.08  # s from sending a move to the bed starting (bench-log: measured 0.08 to 0.1 s over)
 FORGET = 0.5  # s with no hand near before the hysteresis starts afresh (the tracker's forget time)
@@ -102,6 +113,10 @@ class Rail:
     """The rail and the rim in table coordinates, from the bowl and rim calibration files."""
 
     def __init__(self, cal: Calibration) -> None:
+        self.load(cal)
+
+    def load(self, cal: Calibration) -> None:
+        """Read the bowl and rim calibration files (again, after dodge has calibrated by itself)."""
         b, r = np.load(BOWL_FILE), np.load(RIM_FILE)
         if int(r["base_id"]) != int(b["marker_id"]):
             raise SystemExit("rim.npz was made with a different base marker: run rim_calibrate.py again")
@@ -117,7 +132,7 @@ class Rail:
     def anchor(self, centre: np.ndarray, y: float) -> np.ndarray:
         """Re-place the rail so the base marker centre (table mm) is where it should be at Y=y,
         e.g. right after homing. Keeps the rail's direction. Returns the shift (along, across,
-        up), mm: how far the printer has moved since bowl_calibrate.py."""
+        up), mm: how far the printer has moved since the rail was calibrated."""
         new_home = centre - y * self.scale * self.axes[0]
         shift = (new_home - self.home) @ self.axes.T
         self.home = new_home
@@ -323,6 +338,13 @@ def main() -> int:
     ap.add_argument("--sound-record", metavar="WAV", help="also write everything the sound plays to this file")
     ap.add_argument("--slip", type=float, default=6.0, help="marker vs axis difference that means lost steps, mm")
     ap.add_argument("--max-err", type=float, default=20.0, help="reject hand pairs above this px error")
+    ap.add_argument("--threads", type=int, default=12, help="hand finders running at once (finders.py)")
+    ap.add_argument("--sweep", type=int, default=8, help="most sweep tiles per camera per frame pair (finders.py)")
+    ap.add_argument("--calibrate", action="store_true",
+                    help="calibrate the rail at start-up, as bowl_calibrate.py does (it also does so by itself "
+                         "whenever it finds the printer moved sideways)")
+    ap.add_argument("--plain", action="store_true",
+                    help="one hand finder per camera on the whole frame, as before finders.py")
     ap.add_argument("--spread", action="store_true", help="Y driver in spreadCycle: louder, more torque at speed")
     ap.add_argument("--misses", action="store_true",
                     help="save both cameras' pictures to runs/misses when a hand is seen by one camera only")
@@ -346,7 +368,7 @@ def main() -> int:
     face = Face(face_port) if face_port else None
     print(f"face on {face_port}" if face else "no face", flush=True)
     snd = Sound.open(a.sound, a.sound_device, a.volume, a.sound_record)
-    cams, dets = [], []
+    cams, dets, finders = [], [], None
     frames, run_t0 = 0, time.monotonic()
     seen_by = {k: 0 for k in ("both", "cam0 only", "cam1 only", "rejected", "none")}  # frames, for the end
     cv2.namedWindow("dodge", cv2.WINDOW_NORMAL)  # resizable, to fit the screen
@@ -355,7 +377,19 @@ def main() -> int:
         exposure = (a.exposure or [None]) * (2 if a.exposure is None or len(a.exposure) == 1 else 1)
         cams = open_cameras(a.cams, exposure, a.gain)
         wait_for_frames(cams)
-        dets = [Detector(c, 2) for c in cams]
+        if a.plain:
+            dets = [Detector(c, 2) for c in cams]
+        else:
+            # Hands are looked for along a line of sight only this close to the bowl's path.
+            half = (YMAX - YMIN) / 2 * rail.scale
+
+            def zone(P: np.ndarray) -> np.ndarray:
+                rp = rail.to_rail(P, YMID)
+                along = np.maximum(np.abs(rp[:, 0]) - half, 0)
+                up = np.maximum(np.maximum(-100 - rp[:, 2], rp[:, 2] - a.height), 0)
+                return np.sqrt(along ** 2 + rp[:, 1] ** 2 + up ** 2)
+
+            finders = Finders(cams, cal, zone, a.trigger + 100, a.threads, a.sweep)
         tracker = Tracker(0.5)
         axis = Axis(m, YMIN)
         state = {"text": "starting", "banner": None, "enabled": True, "stopped": False, "log": [],
@@ -388,7 +422,7 @@ def main() -> int:
 
         def frame_view() -> tuple | None:
             """Newest results from both cameras, or None if nothing new."""
-            got = [d.latest() for d in dets]
+            got = finders.latest() if finders else [d.latest() for d in dets]
             if any(g[0] is None for g in got) or [g[1] for g in got] == last_seq:
                 return None
             last_seq[:] = [g[1] for g in got]
@@ -443,6 +477,8 @@ def main() -> int:
             else:
                 info += "     no hand"
             info += f"     {state.get('seen', '')}"
+            if finders:
+                info += f"     {finders.stats}"
             if horns_from is not None:
                 info += f"     horns {now - horns_from:.1f} s"
             if face:
@@ -494,8 +530,67 @@ def main() -> int:
             say(f"anchored on marker: printer moved {along:+.0f} along, {across:+.0f} across, "
                 f"{up:+.0f} up since calibration")
             if abs(across) > 10 or abs(up) > 10:
-                state["banner"] = "printer moved sideways since calibration: run bowl_calibrate.py"
+                if m:
+                    say("printer moved sideways since calibration")
+                    recalibrate()
+                else:
+                    state["banner"] = "printer moved sideways since calibration: run bowl_calibrate.py"
+                    say(state["banner"])
+
+        def settle(seconds: float) -> None:
+            end = time.monotonic() + seconds
+            while time.monotonic() < end:
+                idle_show()
+
+        def recalibrate() -> None:
+            """The printer moved sideways: calibrate the rail as bowl_calibrate.py does, without
+            leaving dodge. The bed goes slowly through the stops, the base marker is measured in
+            3D at each, and the fitted rail is checked (travel, straightness, marker size), saved
+            and used. If the check fails, nothing is saved and dodging stays off with the reason
+            on the banner. Starts and ends at the home end, Y5."""
+            say("calibrating the rail")
+            found: dict[int, list[tuple[float, np.ndarray, float]]] = {}
+            for i, stop in enumerate(STOPS):
+                state["text"] = f"calibrating the rail: stop {i + 1} of {len(STOPS)}, Y{stop:g}"
+                m.send(f"G0 Y{stop:g} F{FEED}")
+                m.send("M400", timeout=60, idle=idle_show)
+                settle(0.7)
+                per_id: dict[int, list[np.ndarray]] = {}
+                errs: dict[int, list[float]] = {}
+                pairs, end = 0, time.monotonic() + 10
+                while pairs < 15 and time.monotonic() < end:
+                    got = frame_view()
+                    if got is None:
+                        cv2.waitKey(1)
+                        continue
+                    pairs += 1
+                    mk0, mk1 = got[0][0][3], got[1][0][3]
+                    draw(got, time.monotonic(), [], match_markers(cal, mk0, mk1), [])
+                    cv2.waitKey(1)
+                    for mid in mk0.keys() & mk1.keys():
+                        X = cal.triangulate(mk0[mid], mk1[mid])  # camera 0 frame, as bowl.npz keeps it
+                        per_id.setdefault(mid, []).append(X)
+                        errs.setdefault(mid, []).append(cal.reprojection_error(X, mk0[mid], mk1[mid]))
+                for mid, xs in per_id.items():
+                    if len(xs) >= pairs / 2:
+                        found.setdefault(mid, []).append((stop, np.median(np.array(xs), axis=0),
+                                                          float(np.median(errs[mid]))))
+                say(f"Y{stop:g}: " + (", ".join(f"marker {mid}" for mid in sorted(per_id)) or "no marker"))
+            m.send(f"G0 Y{YMIN:g} F{FEED}")
+            m.send("M400", timeout=60, idle=idle_show)
+            results, lines = fit_markers(cal, found, MARKERS_MM, len(STOPS))
+            for line in lines:
+                say(line)
+            best = best_marker(results, MARKERS_MM) if results else None
+            if best is None or not results[best]["ok"]:
+                state["banner"] = ("rail calibration OFF: check nothing holds the bed back, "
+                                   "then press h to try again")
                 say(state["banner"])
+                return
+            save_bowl(best, results[best])
+            rail.load(cal)
+            state["calibrated"] = True
+            say(f"rail calibrated on marker {best} and saved to calib/bowl.npz")
 
         def idle_show() -> None:
             got = frame_view()
@@ -523,6 +618,8 @@ def main() -> int:
             m.send(f"M203 Y{a.speed:g}")
             m.send(f"M201 Y{a.accel:g}")
             axis = rehome("homing Y")
+            if a.calibrate and not state["banner"] and not state.get("calibrated"):  # not twice
+                recalibrate()
         say(f"ready: dodge at {a.speed:g} mm/s, {a.accel:g} mm/s2, trigger {a.trigger:g} mm")
         state["text"] = "watching"
         if snd:
@@ -817,6 +914,8 @@ def main() -> int:
             snd.close()
         for d in dets:
             d.close()
+        if finders:
+            finders.close()
         for c in cams:
             c.close()
         if face:
