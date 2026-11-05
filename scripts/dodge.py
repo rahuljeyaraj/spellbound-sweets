@@ -45,10 +45,12 @@ G92: Marlin shifts its soft limits with it, so a stall point became a wall.) 800
 Horns: a hand showing the horns (index and little finger up, middle and ring folded) for
 --horns-hold s, seen by either camera on its own, stops the game: any feint return is dropped and the bowl slides to the middle of
 the rail at the gentle --slide speed and stays there, so a sweet can be taken. Only a hand below
-the rim in its way holds the slide up. From when it gets there, the kids have --resume s to take
-a sweet, counted down on the screen; then dodging starts again whatever the hands are doing (or
-at once on d), and the bowl goes on to an end as usual, unless a hand is still in it. The horns
-must be dropped and shown again to stop it again, so holding them up does not stop it for good.
+the rim in its way holds the slide up. It stays under the spell as long as the horns are up.
+Once they drop (gone for half a second), the kids have --resume s to take a sweet, counted
+down on the screen; horns shown again in that time put it back under the spell, and the count
+starts afresh when they drop. When the time is up, dodging starts again whatever the hands are
+doing (or at once on d), and the bowl goes on to an end as usual, unless a hand is still in it.
+To stop it again after that, the horns must be dropped and shown again.
 
 Face: the LED face (leds/src/main.cpp) is found on USB by itself (--face). It sleeps when no
 hand has been seen for 2 s, watches while one is about, snarls from each dodge, feint or shake
@@ -298,7 +300,7 @@ def main() -> int:
     ap.add_argument("--shake-speed", type=float, default=300, help="shake top speed, mm/s")
     ap.add_argument("--shake-accel", type=float, default=5000, help="shake acceleration, mm/s^2")
     ap.add_argument("--horns-hold", type=float, default=0.3, help="horns held this long stop the game, s")
-    ap.add_argument("--resume", type=float, default=10.0, help="after a horns stop, time to take a sweet in the middle, s")
+    ap.add_argument("--resume", type=float, default=10.0, help="after a horns stop, time to take a sweet once the horns drop, s")
     ap.add_argument("--slide", type=float, default=150, help="speed of the slide to the middle, mm/s")
     ap.add_argument("--slide-accel", type=float, default=1000, help="acceleration of that slide, mm/s^2")
     ap.add_argument("--face", default="auto", help="the LED face's serial port; auto finds it, none for no face")
@@ -663,14 +665,25 @@ def main() -> int:
             if state["stopped"]:
                 # Horns: slide to the middle and stay there, whatever the hands do, unless a low
                 # hand is in the way.
+                # It stays under the spell while the horns are up; the --resume s count only
+                # starts once they have been gone for half a second, and horns held up again stop
+                # the count until they drop again.
                 if moving or abs(y - YMID) <= 2:
                     if not moving:
-                        if free_until is None:
+                        horns_up = horns_from is not None and now - horns_from >= a.horns_hold
+                        if horns_up and free_until is not None:
+                            free_until = None
+                            say("horns again: under the spell until they drop")
+                            if snd:
+                                snd.post("cancel", tag="countdown", fade=0.6)
+                        if free_until is None and now - horns_last > 0.5:
                             free_until = now + a.resume
-                            say(f"in the middle: {a.resume:g} s to take a sweet")
+                            say(f"horns down: {a.resume:g} s to take a sweet")
                             if snd:
                                 snd.event("free", free_until)  # the music box ends with the time
-                        state["text"] = f"STOPPED (horns): take a sweet! Dodging again in {np.ceil(free_until - now):.0f} s"
+                        state["text"] = ("STOPPED (horns): take a sweet! Dodging again in "
+                                         f"{np.ceil(free_until - now):.0f} s" if free_until is not None
+                                         else f"UNDER THE SPELL (horns): take a sweet! {a.resume:g} s more once the horns drop")
                 elif path_blocked(low, (YMID - y) * rail.scale, rail.radius):
                     hold = "holding: hand below the rim in the way to the middle"
                 elif not state["banner"]:
