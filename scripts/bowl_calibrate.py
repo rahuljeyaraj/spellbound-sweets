@@ -2,6 +2,7 @@
 
     uv run python scripts/bowl_calibrate.py --port COM9
     uv run python scripts/bowl_calibrate.py --port COM9 --exposure -5 --stops 5 60 110 160 215
+    uv run python scripts/bowl_calibrate.py --port COM9 --rim 72.5 --wait-key   # rail and rim, a key press first
 
 Needs the camera calibration from stereo_calibrate.py. The table and the printer can move
 between runs; the cameras must not (if they did, recalibrate them).
@@ -18,20 +19,26 @@ and checks itself: the marker must move as far as the G-code said, the stops mus
 straight line, and the marker's printed size must come out right. If those are off, a camera
 has been bumped. The result goes to calib/bowl.npz.
 
-A live window shows both cameras the whole time, with each marker outlined and its 3D
-position, and the results at the end. Press q to stop (mid-run it quick-stops the bed).
+With --rim (the lid card lying on the bowl), it then finds the rim as rim_calibrate.py does, in
+the same window: rail and rim in one go.
+
+A live window shows both cameras the whole time, with each marker outlined, and under them its
+3D position, the progress and the results. --wait-key holds everything until a key is pressed.
+Press q to stop (mid-run it quick-stops the bed).
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+import textwrap
 import time
 
 import cv2
 import numpy as np
 
-from stereo import CALIB_DIR, CALIB_FILE, HEIGHT, MARKER_DICT, MARKERS_MM, WIDTH, Calibration, open_cameras, wait_for_frames
+from stereo import (CALIB_DIR, CALIB_FILE, HEIGHT, LID_ID, MARKER_DICT, MARKERS_MM, WIDTH, Calibration, open_cameras,
+                    wait_for_frames)
 from y_speed import y_switch_triggered
 from y_sweep import Marlin
 
@@ -88,14 +95,22 @@ def marker_lines(m0: dict[int, np.ndarray], m1: dict[int, np.ndarray],
     return lines
 
 
-class Viewer:
-    """Live window of both cameras with the markers outlined, their 3D positions, and progress."""
+LINE_H = 22  # px per text line in the panel under the cameras
+LOG_LINES = 18  # log lines the panel keeps: the whole rail and rim result fits
 
-    def __init__(self, cal: Calibration, cams, det) -> None:
-        self.cal, self.cams, self.det = cal, cams, det
+
+class Viewer:
+    """Live window of both cameras with the markers outlined; under them a panel with the status,
+    each marker's 3D position and the log, so a screen recording shows it all. wait_key holds
+    everything until a key is pressed (time to start the recording)."""
+
+    def __init__(self, cal: Calibration, cams, det, title: str = "bowl calibrate") -> None:
+        self.cal, self.cams, self.det, self.title = cal, cams, det, title
         self.status = ""
         self.log: list[str] = []
         self.last = 0.0
+        self.waiting = False  # wait_key: any key but q starts
+        self.started = False
 
     def show(self, shots: list[np.ndarray] | None = None, found: list[dict[int, np.ndarray]] | None = None) -> None:
         if shots is None:
@@ -110,18 +125,32 @@ class Viewer:
         for v, f in zip(views, found):
             draw_markers(v, f, both)
         view = np.hstack([cv2.resize(v, (WIDTH // 2, HEIGHT // 2)) for v in views])
+
         lines = [(self.status, (0, 255, 255))] + marker_lines(found[0], found[1], both)
-        lines += [(text, (255, 255, 255)) for text in self.log[-8:]]
+        lines += [(text, (235, 235, 235)) for text in self.log[-LOG_LINES:]]
+        panel = np.full((LINE_H * (4 + LOG_LINES) + 12, view.shape[1], 3), 28, np.uint8)
         for k, (text, colour) in enumerate(lines):
-            cv2.putText(view, text, (10, 25 + 25 * k), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4)
-            cv2.putText(view, text, (10, 25 + 25 * k), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2)
-        cv2.imshow("bowl calibrate", view)
-        if cv2.waitKey(1) & 0xFF == ord("q"):
+            cv2.putText(panel, text, (12, 24 + LINE_H * k), cv2.FONT_HERSHEY_SIMPLEX, 0.55, colour, 1, cv2.LINE_AA)
+        cv2.imshow(self.title, np.vstack([view, panel]))
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"):
             raise KeyboardInterrupt
+        if self.waiting and key != 0xFF:
+            self.started = True
 
     def say(self, text: str) -> None:
-        print(text)
-        self.log.append(text)
+        print(text, flush=True)
+        indent = " " * (len(text) - len(text.lstrip()) + 4)
+        self.log += textwrap.wrap(text, 150, subsequent_indent=indent) or [""]  # fits the panel
+
+    def wait_key(self, what: str) -> None:
+        """Keep the window live until a key is pressed in it (q still quits)."""
+        status, self.status = self.status, f"press any key to {what} (q quits)"
+        self.waiting, self.started = True, False
+        while not self.started:
+            self.show()
+            time.sleep(0.01)
+        self.waiting, self.status = False, status
 
 
 def measure(cal: Calibration, cams, det, frames: int, viewer: Viewer
@@ -180,6 +209,10 @@ def main() -> int:
     ap.add_argument("--marker", type=float, nargs=2, action="append", metavar=("ID", "MM"),
                     help="measured black square size of a printed marker, if not as designed")
     ap.add_argument("--hold", type=float, default=0, help="close the window this many s after the end (0: on q)")
+    ap.add_argument("--rim", type=float, metavar="RADIUS",
+                    help="then find the rim too, as rim_calibrate.py does: lid card on the bowl, rim radius in mm")
+    ap.add_argument("--wait-key", action="store_true",
+                    help="wait for a key press in the window before anything moves: time to start a screen recording")
     a = ap.parse_args()
 
     sizes = dict(MARKERS_MM)
@@ -197,9 +230,11 @@ def main() -> int:
     try:
         cams = open_cameras(a.cams, a.exposure)
         wait_for_frames(cams)
-        v = Viewer(cal, cams, det)
+        v = Viewer(cal, cams, det, "calibrate the rail and the rim" if a.rim else "bowl calibrate")
         v.status = "starting cameras"
         hold(v, 1.0)  # let auto exposure settle
+        if a.wait_key:
+            v.wait_key("calibrate the rail" + (" and the rim" if a.rim else ""))
         m.send("G21")
         m.send("G90")
         m.send("M204 P500 T500")
@@ -225,6 +260,12 @@ def main() -> int:
         m.send("M400", timeout=60, idle=v.show)
 
         ok = report(v, cal, found, sizes, len(a.stops))
+        if a.rim is not None:
+            if ok:
+                from rim_calibrate import measure_rim  # here: rim_calibrate imports this file
+                ok = measure_rim(v, cal, cams, det, a.rim)
+            else:
+                v.say("rail not GOOD: rim not measured")
         v.status = "done: press q to close"
         hold(v, a.hold or float("inf"))  # keep the window live until q (or --hold seconds)
     except KeyboardInterrupt:
@@ -301,7 +342,11 @@ def report(v: Viewer, cal: Calibration, found: dict[int, list[tuple[float, np.nd
     results, lines = fit_markers(cal, found, sizes, stops)
     for line in lines:
         v.say(line)
+    # The lid card rides on the bowl while the rail is measured with --rim, but it comes off:
+    # it is never the base marker.
+    results = {mid: r for mid, r in results.items() if mid != LID_ID}
     if not results:
+        v.say("the base marker was not seen: nothing saved")
         return False
     best = best_marker(results, sizes)
     save_bowl(best, results[best])
