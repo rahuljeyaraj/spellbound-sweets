@@ -46,8 +46,9 @@ Hand points below the rim never trigger a dodge, and if one is in the bowl or in
 bowl stays put: moving into a hand made it lose steps.
 Shake: staying put let one hand held low pin the bowl while the other took the lid. So whenever
 the bowl is holding (a low hand in its way, cornered at the end, a hand that has not come
-closer) and a hand point at least --shake-below mm below the rim (2 cm: a hand down beside the
-bowl, not one over it) is within --shake-near mm of the rim centre, it rattles: a --shake mm hop
+closer) and a hand whose palm (wrist and knuckles) is at least --shake-below mm below the rim
+(2 cm: a hand down beside the bowl, not one over it or resting on top with its fingertips over
+the edge) has a point within --shake-near mm of the rim centre, it rattles: a --shake mm hop
 towards the middle and straight back, again and again until the hand goes or the way clears.
 Each way takes about 0.15 s; if bumping a hand ever loses steps, the marker check re-homes as usual.
 (12 mm hops did little, and counting hands over the bowl made it shake far too often.)
@@ -67,7 +68,8 @@ doing (or at once on d), and the bowl goes on to an end as usual, unless a hand 
 To stop it again after that, the horns must be dropped and shown again.
 
 Face: the LED face (leds/src/main.cpp) is found on USB by itself (--face). It sleeps when no
-hand has been seen for 2 s, watches while one is about, snarls from each dodge, feint or shake
+hand has been near for 2 s, watches while one is (a 3D hand within --wake mm of the rim centre;
+hands further off, or seen by one camera only, are ignored by the eyes and the tone too), snarls from each dodge, feint or shake
 and while a hand is in the bowl, and cries while the horns have stopped the game. Once snarling
 it keeps on while a hand stays within --trigger mm, and for --snarl-hold s after (3 s: in case
 it comes back), so it does not flick between snarling and watching. The
@@ -77,9 +79,12 @@ they look the wrong way. If dodge.py stops sending, the face falls asleep after 
 Sound (scripts/sound.py) plays on the USB speaker (--sound none for none): a tone that follows
 the hand, the skull's voice for each mood, a whoosh fitted to every move, the spell sting, the
 music box over the last seconds of the --resume time, and the night around it. --sound-record
-writes what it plays to a WAV.
+writes what it plays to a WAV. --sound-only plays only some of it, by group or single sound:
+--sound-only background spot hand --no-dodge is the night and the hand tone with the bowl still,
+and --sound-only voice musicbox the creature and the music box.
 
-Keys: q quit, h re-home, d dodging on or off (and ends a horns stop).
+Keys: q quit, h re-home, d dodging on or off (and ends a horns stop). While it is off, the
+horns do nothing either.
 """
 
 from __future__ import annotations
@@ -95,9 +100,9 @@ from serial.tools import list_ports
 
 from bowl_calibrate import BOWL_FILE, FEED, best_marker, draw_markers, fit_markers, match_markers, save_bowl
 from finders import Finders
-from hand3d import Detector, Map, Tracker, draw_hand, ensure_model, is_horns, match_hands
+from hand3d import PALM, Detector, Map, Tracker, draw_hand, ensure_model, is_horns, match_hands
 from rim_calibrate import RIM_FILE, rail_frame
-from sound import Sound
+from sound import GROUPS, SOUNDS, Sound
 from stereo import CALIB_FILE, HEIGHT, MARKERS_MM, WIDTH, Calibration, open_cameras, wait_for_frames
 from y_speed import y_switch_triggered
 from y_sweep import Marlin
@@ -321,7 +326,7 @@ def main() -> int:
     ap.add_argument("--shake", type=float, default=25, help="hop of the shake when a near hand pins the bowl, mm; 0 for none")
     ap.add_argument("--shake-near", type=float, default=150, help="shake when a hand point is this close to the rim centre, mm")
     ap.add_argument("--shake-below", type=float, default=20,
-                    help="shake only for a hand point at least this far below the rim, mm")
+                    help="shake only for a hand whose palm is at least this far below the rim, mm")
     ap.add_argument("--shake-speed", type=float, default=300, help="shake top speed, mm/s")
     ap.add_argument("--shake-accel", type=float, default=5000, help="shake acceleration, mm/s^2")
     ap.add_argument("--horns-hold", type=float, default=0.3, help="horns held this long stop the game, s")
@@ -329,6 +334,8 @@ def main() -> int:
     ap.add_argument("--slide", type=float, default=150, help="speed of the slide to the middle, mm/s")
     ap.add_argument("--slide-accel", type=float, default=1000, help="acceleration of that slide, mm/s^2")
     ap.add_argument("--face", default="auto", help="the LED face's serial port; auto finds it, none for no face")
+    ap.add_argument("--wake", type=float, default=450,
+                    help="the face wakes for a hand point this close to the rim centre (3D), mm")
     ap.add_argument("--snarl-hold", type=float, default=3.0,
                     help="the face snarls this long after a dodge, or after a hand leaves the bowl or goes, s")
     ap.add_argument("--face-flip", action="store_true", help="the eyes look the wrong way: mirror them")
@@ -336,6 +343,12 @@ def main() -> int:
     ap.add_argument("--sound-device", help="the speaker: device number or part of its name (sound.py --devices)")
     ap.add_argument("--volume", type=float, default=1.0, help="sound volume, 0 to 1")
     ap.add_argument("--sound-record", metavar="WAV", help="also write everything the sound plays to this file")
+    ap.add_argument("--sound-only", nargs="+", choices=list(GROUPS) + list(SOUNDS), metavar="NAME",
+                    help=f"play only these groups ({' '.join(GROUPS)}; hand is the hand tone) or single "
+                    "sounds (sound.py's SOUNDS), e.g. background spot hand: the night and the hand tone; "
+                    "voice musicbox: the creature and the music box")
+    ap.add_argument("--no-dodge", action="store_true",
+                    help="start with dodging off, so the bowl stays put (d turns it on)")
     ap.add_argument("--slip", type=float, default=6.0, help="marker vs axis difference that means lost steps, mm")
     ap.add_argument("--max-err", type=float, default=20.0, help="reject hand pairs above this px error")
     ap.add_argument("--threads", type=int, default=12, help="hand finders running at once (finders.py)")
@@ -367,7 +380,7 @@ def main() -> int:
     face_port = None if a.face == "none" else find_face() if a.face == "auto" else a.face
     face = Face(face_port) if face_port else None
     print(f"face on {face_port}" if face else "no face", flush=True)
-    snd = Sound.open(a.sound, a.sound_device, a.volume, a.sound_record)
+    snd = Sound.open(a.sound, a.sound_device, a.volume, a.sound_record, a.sound_only)
     cams, dets, finders = [], [], None
     frames, run_t0 = 0, time.monotonic()
     seen_by = {k: 0 for k in ("both", "cam0 only", "cam1 only", "rejected", "none")}  # frames, for the end
@@ -392,7 +405,7 @@ def main() -> int:
             finders = Finders(cams, cal, zone, a.trigger + 100, a.threads, a.sweep)
         tracker = Tracker(0.5)
         axis = Axis(m, YMIN)
-        state = {"text": "starting", "banner": None, "enabled": True, "stopped": False, "log": [],
+        state = {"text": "starting", "banner": None, "enabled": not a.no_dodge, "stopped": False, "log": [],
                  "missed": [[0, 0.0], [0, 0.0]]}  # per camera: times and seconds it missed a hand the other had
         last_seq = [0, 0]
         still_since = time.monotonic()
@@ -407,7 +420,7 @@ def main() -> int:
         horns_spent = False  # these horns have stopped it once; they must be dropped first
         free_until: float | None = None  # when a horns stop ends, once the bowl is in the middle
         snarl_until = 0.0  # the face snarls until then, after a dodge
-        hand_any = 0.0  # when either camera last saw a hand
+        hand_near = 0.0  # when a hand was last within --wake mm of the rim centre
         rng = np.random.default_rng()
         # A hand that gets no 3D position is shown on the status bar, and with --misses saved
         # when it lasts.
@@ -707,7 +720,8 @@ def main() -> int:
             elif horns_from is not None and now - horns_last > 0.15:
                 horns_from = None
                 horns_spent = False
-            if (not state["stopped"] and not horns_spent and horns_from is not None
+            # With dodging off (d, --no-dodge) the bowl stays put: the horns do nothing either.
+            if (not state["stopped"] and state["enabled"] and not horns_spent and horns_from is not None
                     and now - horns_from >= a.horns_hold):
                 state["stopped"] = True
                 horns_spent = True
@@ -856,14 +870,18 @@ def main() -> int:
                 hold = last_hold  # mid-shake: still the same hold
             elif (hold and not moving and a.shake > 0 and state["enabled"] and not state["stopped"]
                     and not state["banner"]):
-                # Only a hand down beside the bowl pins it; one over the opening is a reach.
-                near = min((float(np.hypot(p[0], p[1])) for _, rp in hand_rps for p in rp
-                            if p[2] < -a.shake_below), default=np.inf)
+                # Only a hand down beside the bowl pins it; one over the opening is a reach. The
+                # palm must be down, not just a point: a hand resting on top of the bowl has its
+                # fingertips over the edge, below the rim, and that shook it (2026-11-06).
+                low_hands = [(float(np.hypot(rp[:, 0], rp[:, 1]).min()), float(rp[PALM, 2].mean()))
+                             for _, rp in hand_rps if rp[PALM, 2].mean() < -a.shake_below]
+                near, palm_z = min(low_hands, default=(np.inf, 0.0))
                 if near < a.shake_near:
                     axis.shake(a.shake if y < YMID else -a.shake, a.shake_speed, a.shake_accel)
                     moving = True
                     snarl_until = max(snarl_until, now + a.snarl_hold)
-                    hold = "shaking: " + hold.removeprefix("holding: ")
+                    hold = ("shaking: " + hold.removeprefix("holding: ")
+                            + f" (palm {palm_z:+.0f} mm, hand {near:.0f} mm from rim centre)")
                     if snd and not (last_hold or "").startswith("shaking"):
                         snd.event("cornered")
             if hold:
@@ -874,11 +892,15 @@ def main() -> int:
                 last_hold = hold
 
             # The face: crying while it has given up (horns), snarling during and for a while after
-            # a dodge or while a hand is in the bowl, watching while a hand is about, else asleep.
+            # a dodge or while a hand is in the bowl, watching while a hand is near, else asleep.
             # The eyes follow the nearest hand along the rail, seen from the face at the rail's
             # middle. The sound gets the same mood and the palms.
-            if hands0 or hands1:
-                hand_any = now
+            # Near: a 3D hand (seen by both cameras) with a point within --wake mm of the rim
+            # centre. Any hand in either picture woke it before, even hands and feet across the
+            # room (2026-11-06). Hands further off are ignored by the eyes and the tone too.
+            near_hands = [tr for tr, rp in hand_rps if np.linalg.norm(rp, axis=1).min() < a.wake]
+            if near_hands:
+                hand_near = now
             in_bowl = path_blocked(low, 0.0, rail.radius)
             # Snarling lasts while a hand is in the bowl or still near, and --snarl-hold s after:
             # a hand pulled back for a moment often comes again, and the face flicking between
@@ -886,8 +908,8 @@ def main() -> int:
             if in_bowl or (now < snarl_until and dist < a.trigger):
                 snarl_until = max(snarl_until, now + a.snarl_hold)
             mood = ("c" if state["stopped"] else "n" if now < snarl_until
-                    else "w" if now - hand_any < 2.0 else "s")
-            palms = rail.to_rail(np.array([tr.palm for tr, _ in current]), y) if current else None
+                    else "w" if now - hand_near < 2.0 else "s")
+            palms = rail.to_rail(np.array([tr.palm for tr in near_hands]), y) if near_hands else None
             if face:
                 hand_x = None
                 if palms is not None:

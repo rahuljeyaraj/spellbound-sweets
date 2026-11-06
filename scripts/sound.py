@@ -233,7 +233,7 @@ class Bank:
             wanted = keep is None or name in keep
             self.takes[name] = [load(p, s.loop) for p in sorted(folder.glob(s.files))] if wanted else []
         self.last: dict[str, int] = {}
-        self.missing = [n for n, t in self.takes.items() if not t]
+        self.missing = [n for n, t in self.takes.items() if not t and (keep is None or n in keep)]
 
     def pick(self, name: str, rng: np.random.Generator, near: float | None = None) -> Take | None:
         """A random take, not the one played last. With near (s), one of the two whose length is
@@ -542,6 +542,7 @@ class Mixer:
         self.n = 0  # samples rendered
         self.t_first = 0.0
         self.hand = HandTone(hand_voice)
+        self.hand_on = True  # False: the hand tone stays silent (Sound.open's groups)
         self.reverb = Reverb()
         self.limiter = Limiter()
         self.hpf = signal.butter(4, 90, "highpass", fs=SR, output="sos")
@@ -611,7 +612,8 @@ class Mixer:
             start, v.start = v.start, 0
             v.mix(breaths if v.group == "voice" and v.tag == "mood" else buses[v.group], start)
         self.voices = [v for v in self.voices if not v.done]
-        self.hand.render(buses["hand"])
+        if self.hand_on:
+            self.hand.render(buses["hand"])
         if self.wind:  # the wind rises with a hand near the bowl, and settles when it goes
             self.wind.gain = db(self.bank.sounds["wind"].db + HAND["wind_db"] * self.hand.close * min(self.hand.amp, 1))
 
@@ -848,20 +850,25 @@ class Sound:
 
     @classmethod
     def open(cls, how: str = "auto", device: str | None = None, volume: float = 1.0,
-             record: str | None = None) -> "Sound | None":
+             record: str | None = None, groups: list[str] | None = None) -> "Sound | None":
         """For dodge.py: the speaker found and the stream running, or None (with the reason
-        printed) for --sound none or no speaker."""
+        printed) for --sound none or no speaker. groups: play only these GROUPS ("hand" is the
+        hand tone) and single SOUNDS by name, e.g. background, spot and hand to film the sound
+        without the creature, or voice and musicbox for the creature."""
         if how == "none":
             return None
         try:
-            mixer = Mixer(Bank())
+            keep = None if groups is None else {n for n, s in SOUNDS.items() if s.group in groups or n in groups}
+            mixer = Mixer(Bank(keep=keep))
+            mixer.hand_on = groups is None or "hand" in groups
             if mixer.bank.missing:
                 print(f"sound: no files for {', '.join(mixer.bank.missing)} (run scripts/make_sounds.py)", flush=True)
             live = Live(mixer, device, volume, record)
         except Exception as e:  # no speaker, or it would not open: play the game without sound
             print(f"sound: off ({e})", flush=True)
             return None
-        print(f"sound on {live.name}, volume {volume:g}" + (f", recording to {record}" if record else ""), flush=True)
+        print(f"sound on {live.name}, volume {volume:g}" + (f", recording to {record}" if record else "")
+              + (f", only {' '.join(groups)}" if groups else ""), flush=True)
         return cls(mixer, live)
 
     def post(self, kind: str, at: float | None = None, **kw) -> None:
