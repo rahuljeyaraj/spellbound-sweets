@@ -42,7 +42,7 @@ two webcams ──► mini PC ──► SKR board (G-code) ──► Y axis and 
 | `leds/` | Firmware for the face (PlatformIO, Arduino-Pico core, Adafruit NeoPixel) |
 | `face/face_preview.html` | A browser preview of the face, every LED in place, the mouse as the hand |
 | `sounds/` | `sources.md` credits every recording; `preview.html` is a listening page |
-| `print/` | The "TRY THIS!" sign as SVG, for a laser or a print |
+| `print/` | My printed parts as .3mf: the skull face (head, jaw, eyes, nose, mouth and the LED holders behind them), the plain bowl lid, the "TRY THIS!" sign and the base plate for the horns hand and sign. The sign is also there as SVG, for a laser (the one on my table is `try-this-spooky-1-line.svg`) |
 
 Each script explains itself at the top of the file.
 
@@ -158,8 +158,8 @@ Calibration results go in `calib/`, which is not in git: they only fit my camera
 - The sounds are cut from 81 recordings on [Freesound](https://freesound.org). Every one is
   listed with its author and licence in [sounds/sources.md](sounds/sources.md). Thank you to
   everyone who shared them.
-- The horns hand is "hand gestures" by lukino_maker3d on
-  [MakerWorld](https://makerworld.com/en/models/2328721-hand-gestures), CC BY-NC-SA.
+- The horns hand is "hand gestures" by lukino_maker3d on [MakerWorld](https://makerworld.com/en/models/2328721-hand-gestures), CC BY-NC-SA 4.0. It isn't in this repo; download it from there.
+- The "TRY THIS!" letters are [Creepster](https://fonts.google.com/specimen/Creepster) by Sideshow, SIL Open Font License.
 - Much of the code was written with Claude, an AI helper from Anthropic.
 
 ## Licence
