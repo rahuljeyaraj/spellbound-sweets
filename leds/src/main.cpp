@@ -7,6 +7,9 @@
 // then optionally where the hand is, -100 (the face's far left) to 100 (far right), e.g. "w-35".
 // With a hand the eyes follow it; without one they wander. Until the first line arrives the
 // face loops the moods, five seconds each, as a test; if the lines stop for STALE_MS it sleeps.
+// One more letter, p, is for photos (scripts/face_photo.py): the snarl held still, jaw wide, no
+// flicker, the pupils fixed (down at the bowl unless a place is given), the hand ring solid
+// yellow. It holds until the next line, so one line is enough.
 #include <Arduino.h>
 #include <Adafruit_NeoPixel.h>
 #include <math.h>
@@ -191,12 +194,13 @@ void watching(float t) {
   paintMouth(SHUT, inks, 2, .75f + .15f * sinf(t * 9));
 }
 
-void snarl(float t) {
+// still: the photo pose, the jaw held wide and no flicker
+void snarl(float t, bool still) {
   EyeSpec s = { YELLOW, ANGRY, BLOOD, .85f, WANDER };
   openEye(LEFT, s, t); openEye(RIGHT, s, t);
-  finishEyes(.9f + .1f * rnd());
+  finishEyes(still ? 1 : .9f + .1f * rnd());
   Ink inks[] = { { 'o', RED }, { 'T', TOOTH } };
-  paintMouth(sinf(t * 7) > -0.2f ? WIDE : SHUT, inks, 2, .85f + .15f * rnd());
+  paintMouth(still || sinf(t * 7) > -0.2f ? WIDE : SHUT, inks, 2, still ? 1 : .85f + .15f * rnd());
 }
 
 void crying(float t) {
@@ -230,7 +234,7 @@ const Rgb HINT = YELLOW, GREEN = { 0, 255, 40 };
 
 // Off while the face sleeps. Watching, a slow yellow breath says "this hand"; snarling, it blinks
 // yellow and red to pull the eye to it. Once the horns have worked it fills green one LED at a
-// time, then stays lit; since is how long ago that began.
+// time, then stays lit; since is how long ago that began. In the photo pose it is solid yellow.
 void signRing(int mood, float t, float since) {
   auto set = [](int i, Rgb c, float v) { signT[i][0] = c.r * v; signT[i][1] = c.g * v; signT[i][2] = c.b * v; };
   if (mood == 0) return;
@@ -238,8 +242,8 @@ void signRing(int mood, float t, float since) {
     for (int i = 0; i < SIGN_N; i++) set(i, GREEN, constrain(since * 10 - i, 0, 1));
     return;
   }
-  if (mood == 2) {
-    Rgb c = fmodf(t, .5f) < .25f ? HINT : RED;
+  if (mood == 2 || mood == 4) {
+    Rgb c = mood == 4 || fmodf(t, .5f) < .25f ? HINT : RED;
     for (int i = 0; i < SIGN_N; i++) set(i, c, 1);
     return;
   }
@@ -264,12 +268,12 @@ void readSerial() {
       continue;
     }
     line[n] = 0;
-    const char *m = n ? strchr("swnc", line[0]) : nullptr;
+    const char *m = n ? strchr("swncp", line[0]) : nullptr;
     if (m) {
-      cmdMood = m - "swnc";
+      cmdMood = m - "swncp";
       cmdAt = millis();
-      hasHand = n > 1;
-      if (hasHand) handX = constrain(atoi(line + 1), -100, 100) / 100.0f;
+      hasHand = n > 1 || cmdMood == 4;   // the photo pose never wanders: no place given, it looks down
+      handX = n > 1 ? constrain(atoi(line + 1), -100, 100) / 100.0f : 0;
     }
     n = 0;
   }
@@ -285,7 +289,7 @@ void setup() {
 }
 
 void loop() {
-  static const char *NAMES[4] = { "sleeping", "watching", "snarl", "crying" };
+  static const char *NAMES[5] = { "sleeping", "watching", "snarl", "crying", "photo" };
   static int lastMood = -1;
   static uint32_t moodSince = 0;
   uint32_t frameStart = millis();
@@ -294,7 +298,7 @@ void loop() {
   readSerial();
   int mood;
   if (cmdMood < 0) mood = ((int)(t / MOOD_S)) % 4;   // nothing heard yet: loop them as a test
-  else if (millis() - cmdAt > STALE_MS) { mood = 0; hasHand = false; }   // the PC went quiet: sleep
+  else if (cmdMood != 4 && millis() - cmdAt > STALE_MS) { mood = 0; hasHand = false; }   // the PC went quiet: sleep
   else mood = cmdMood;
   if (mood != lastMood) { Serial.printf("%s, up %lu s\n", NAMES[mood], frameStart / 1000); lastMood = mood; moodSince = frameStart; }
 
@@ -303,11 +307,11 @@ void loop() {
   memset(signT, 0, sizeof signT);
   if (mood == 0) sleeping((frameStart - moodSince) / 1000.0f);
   else if (mood == 1) watching(t);
-  else if (mood == 2) snarl(t);
+  else if (mood == 2 || mood == 4) snarl(t, mood == 4);
   else crying(t);
   signRing(mood, t, (frameStart - moodSince) / 1000.0f);
 
-  float a = mood == 2 ? 0.45f : 0.3f;
+  float a = mood == 2 || mood == 4 ? 0.45f : 0.3f;
   ease(&eyeNow[0][0][0], &eyeT[0][0][0], 2 * RING_N * 3, a);
   ease(&mouthNow[0][0], &mouthT[0][0], 128 * 3, a);
   ease(&signNow[0][0], &signT[0][0], SIGN_N * 3, a);
