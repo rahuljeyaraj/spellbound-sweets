@@ -4,8 +4,7 @@ A creature guards this bowl of sweets, and it doesn't want you to have one. Reac
 snatches the bowl away from your hand, snarling at you. Want a sweet? You'll have to defeat it
 with a spell: show it the horns.
 
-My entry for the element14 Community 2026 Halloween Hackathon. The full build story, with
-video, is on element14: [link to the project post].
+My entry for the element14 Community 2026 Halloween Hackathon. The full build story, with video, is on element14: [Spellbound Sweets: The Creature Snatches the Bowl Until You Cast a Spell](https://community.element14.com/challenges-projects/halloween/a/projects/PR195/spellbound-sweets-the-creature-snatches-the-bowl-until-you-cast-a-spell).
 
 ## How it works
 
@@ -147,20 +146,41 @@ Calibration results go in `calib/`, which is not in git: they only fit my camera
 - Short dodges beside the hand look like the bowl is following it, like a puppy. Jump to the
   far end.
 
-## Credits
+## References
 
-- [MediaPipe Hand Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker)
-  by Google, [OpenCV](https://opencv.org), [Marlin](https://marlinfw.org),
-  [PlatformIO](https://platformio.org) with
-  [platform-raspberrypi](https://github.com/maxgerhardt/platform-raspberrypi) by Max Gerhardt,
-  [Arduino-Pico](https://github.com/earlephilhower/arduino-pico) by Earle Philhower and
-  [Adafruit NeoPixel](https://github.com/adafruit/Adafruit_NeoPixel).
-- The sounds are cut from 81 recordings on [Freesound](https://freesound.org). Every one is
-  listed with its author and licence in [sounds/sources.md](sounds/sources.md). Thank you to
-  everyone who shared them.
-- The horns hand is "hand gestures" by lukino_maker3d on [MakerWorld](https://makerworld.com/en/models/2328721-hand-gestures), CC BY-NC-SA 4.0. It isn't in this repo; download it from there.
+### Software I used
+
+- [MediaPipe Hand Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker) by Google
+- [OpenCV](https://opencv.org): stereo calibration, triangulation, ArUco markers
+- [Marlin](https://marlinfw.org) firmware
+- [PlatformIO](https://platformio.org), with [platform-raspberrypi](https://github.com/maxgerhardt/platform-raspberrypi) by Max Gerhardt
+- [Arduino-Pico](https://github.com/earlephilhower/arduino-pico) by Earle Philhower
+- [Adafruit NeoPixel](https://github.com/adafruit/Adafruit_NeoPixel)
+- [uv](https://github.com/astral-sh/uv) for the Python packages
+
+### Printed models by other people
+
+None of these are in this repo; download them from their pages.
+
+- Horns hand: ["hand gestures"](https://makerworld.com/en/models/2328721-hand-gestures) by lukino_maker3d on MakerWorld, CC BY-NC-SA 4.0.
+- First lid: ["twist and lock container"](https://makerworld.com/en/models/661139-twist-lock-container-multiple-dimensions) by Rikskeff on MakerWorld, Standard Digital File License (printed for personal use).
+- Pumpkins: ["Halloween Pumpkin Collection"](https://makerworld.com/en/models/3104443-halloween-pumpkin-collection-10diff-no-ams-ams) by Jone 3D Design on MakerWorld, Standard Digital File License.
+- Ghost: ["Ghost"](https://www.printables.com/model/615503-ghost) by Jopek Design on Printables, CC BY-NC-ND 4.0.
+- Ghost: ["Ghost"](https://makerworld.com/en/models/1211621-ghost) by drakeforge3d on MakerWorld, Standard Digital File License.
+- Ghost: ["Halloween ghost"](https://makerworld.com/en/models/1846959-halloween-ghost) by CreaMade3D on MakerWorld, Standard Digital File License.
 - The "TRY THIS!" letters are [Creepster](https://fonts.google.com/specimen/Creepster) by Sideshow, SIL Open Font License.
-- Much of the code was written with Claude, an AI helper from Anthropic.
+
+### Sounds
+
+The sounds are cut from 81 recordings on [Freesound](https://freesound.org): 49 are public domain (CC0) and 32 are CC BY. Every one is listed with its author, licence, link and what it is used for in [sounds/sources.md](sounds/sources.md). Thank you to everyone who shared them.
+
+### Other projects mentioned
+
+- [Automated Trick-or-Treating: One Man, Many Dogs, and a Delightfully Overengineered Halloween](https://community.element14.com/challenges-projects/halloween/a/projects/c/project/PR112/automated-trick-or-treating-one-man-many-dogs-and-a-delightfully-overengineered-halloween-185317569) by foxbat, element14 Halloween 2025 winner. My first idea, a bowl that roars if you take too much, was too close to it, so the creature snatches the bowl instead.
+
+### Help
+
+Much of the code was written with Claude, an AI helper from Anthropic.
 
 ## Licence
 
